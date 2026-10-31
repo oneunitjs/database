@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: GitHub Discussions
+    url: https://github.com/oneunitjs/database/discussions
+    about: Ask questions and discuss ideas in the community forum.
+  - name: Documentation
+    url: https://github.com/oneunitjs/database/blob/main/packages/database/README.md
+    about: Read the README for usage and configuration details.

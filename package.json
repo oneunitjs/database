@@ -1,0 +1,122 @@
+{
+  "name": "@oneunit/database",
+  "version": "1.0.0",
+  "description": "PostgreSQL client with pooling, transactions, streaming, schema tools, models, and migrations.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js",
+      "default": "./dist/client/index.js"
+    },
+    "./column": {
+      "types": "./dist/column/index.d.ts",
+      "import": "./dist/column/index.js",
+      "default": "./dist/column/index.js"
+    },
+    "./model": {
+      "types": "./dist/model/index.d.ts",
+      "import": "./dist/model/index.js",
+      "default": "./dist/model/index.js"
+    },
+    "./query": {
+      "types": "./dist/query/index.d.ts",
+      "import": "./dist/query/index.js",
+      "default": "./dist/query/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema/index.d.ts",
+      "import": "./dist/schema/index.js",
+      "default": "./dist/schema/index.js"
+    },
+    "./json-serialization": {
+      "types": "./dist/json-serialization.d.ts",
+      "import": "./dist/json-serialization.js",
+      "default": "./dist/json-serialization.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "examples",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build && npm test",
+    "pack:check": "npm pack --dry-run"
+  },
+  "keywords": [
+    "bootstrap",
+    "framework",
+    "node",
+    "typescript",
+    "postgresql",
+    "postgres",
+    "database",
+    "pool",
+    "transaction",
+    "query-builder",
+    "migrations",
+    "models",
+    "streaming"
+  ],
+  "author": "mayank",
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oneunitjs/database.git",
+    "directory": "packages/database"
+  },
+  "bugs": {
+    "url": "https://github.com/oneunitjs/database/issues"
+  },
+  "homepage": "https://github.com/oneunitjs/database/tree/master/packages/database#readme",
+  "dependencies": {
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "@types/pg": "^8.11.10",
+    "pg-cursor": "^2.21.0",
+    "pg-query-stream": "^4.16.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.7"
+  },
+  "peerDependencies": {
+    "pg-cursor": "^2.21.0",
+    "pg-query-stream": "^4.16.0"
+  },
+  "peerDependenciesMeta": {
+    "pg-cursor": {
+      "optional": true
+    },
+    "pg-query-stream": {
+      "optional": true
+    }
+  }
+}

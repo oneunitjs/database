@@ -1,0 +1,134 @@
+# Stage 3 — isolated real PostgreSQL topology for @oneunit/database sharding.
+#
+# Project:  docker compose -p oneunit-stage3 -f .../compose.yaml up -d
+# Teardown: docker compose -p oneunit-stage3 -f .../compose.yaml down
+#           (never "down -v" unless you are sure these volumes belong to this test)
+#
+# Four independent PostgreSQL processes, one data volume per participant.
+# max_prepared_transactions=100 is enabled on every participant.
+
+name: oneunit-stage3
+
+services:
+  shard-0:
+    image: postgres:16
+    container_name: oneunit-stage3-shard-0
+    environment:
+      POSTGRES_USER: postgres
+      # Empty-ish auth is acceptable only in this isolated test topology.
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: shard0
+    ports:
+      - "5440:5432"
+    command:
+      - "postgres"
+      - "-c"
+      - "max_prepared_transactions=100"
+      - "-c"
+      - "max_connections=100"
+    volumes:
+      - stage3_shard0_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d shard0"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  shard-1:
+    image: postgres:16
+    container_name: oneunit-stage3-shard-1
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: shard1
+    ports:
+      - "5441:5432"
+    command:
+      - "postgres"
+      - "-c"
+      - "max_prepared_transactions=100"
+      - "-c"
+      - "max_connections=100"
+    volumes:
+      - stage3_shard1_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d shard1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  shard-2:
+    image: postgres:16
+    container_name: oneunit-stage3-shard-2
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: shard2
+    ports:
+      - "5442:5432"
+    command:
+      - "postgres"
+      - "-c"
+      - "max_prepared_transactions=100"
+      - "-c"
+      - "max_connections=100"
+    volumes:
+      - stage3_shard2_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d shard2"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  coordination-db:
+    image: postgres:16
+    container_name: oneunit-stage3-coordination-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: coordination
+    ports:
+      - "5443:5432"
+    command:
+      - "postgres"
+      - "-c"
+      - "max_prepared_transactions=100"
+      - "-c"
+      - "max_connections=100"
+    volumes:
+      - stage3_coordination_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d coordination"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+volumes:
+  stage3_shard0_data:
+  stage3_shard1_data:
+  stage3_shard2_data:
+  stage3_coordination_data:
