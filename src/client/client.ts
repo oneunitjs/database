@@ -4,6 +4,12 @@ import { isConnectionError, normalizeError, TimeoutError } from "./errors.js";
 import { createHooks } from "./hooks.js";
 import { withRetry } from "./retry.js";
 
+// Track manually acquired clients for leak detection
+const manualClients = new Set<PoolClient>();
+
+// Connection leak warning threshold (5 minutes)
+const CONNECTION_LEAK_TIMEOUT = 300000;
+
 function isPlainObject(value: unknown): boolean {
     return value !== null && typeof value === "object" && !Array.isArray(value) && !Buffer.isBuffer(value);
 }
@@ -82,6 +88,8 @@ export function createClient(
         connectTimeout?: number;
     } = {},
 ): ClientApi {
+    // Store the logger for use in tracking functions
+    const clientLogger = logger;
     const hooks = options.hooks ?? createHooks({ logger, ...(options.instrumentation ?? {}) });
     const configuredRetry = normalizeRetryOption(options.retry);
     const defaultRetry = configuredRetry
@@ -94,7 +102,7 @@ export function createClient(
         const timeoutMs = clientOptions.timeout ?? defaultConnectTimeout;
 
         if (!timeoutMs) {
-            return pool.connect();
+            return trackManualClient(await pool.connect());
         }
 
         return new Promise((resolve, reject) => {
@@ -107,7 +115,7 @@ export function createClient(
             pool.connect().then(
                 (client) => {
                     clearTimeout(timer);
-                    resolve(client);
+                    resolve(trackManualClient(client));
                 },
                 (error) => {
                     clearTimeout(timer);
@@ -115,6 +123,35 @@ export function createClient(
                 },
             );
         });
+    }
+
+    /**
+     * Wrap a client with leak detection for manual checkouts.
+     */
+    function trackManualClient(client: PoolClient): PoolClient {
+        // Track this client
+        manualClients.add(client);
+        
+        // Set leak detection timeout
+        const leakTimer = setTimeout(() => {
+            if (manualClients.has(client)) {
+                (clientLogger as { warn?: (meta: object, msg: string) => void })?.warn?.({
+                    message: 'Manual client not released - potential connection leak',
+                    stack: new Error().stack,
+                    totalManualClients: manualClients.size,
+                }, 'Database connection leak detected');
+            }
+        }, CONNECTION_LEAK_TIMEOUT);
+        
+        // Wrap release to clean up tracking
+        const originalRelease = client.release.bind(client);
+        client.release = function(this: PoolClient, error?: Error) {
+            clearTimeout(leakTimer);
+            manualClients.delete(client);
+            return originalRelease(error);
+        };
+        
+        return client;
     }
 
     function runQuery(
@@ -177,10 +214,12 @@ export function createClient(
         let caught: Error | undefined;
 
         try {
+            const queryTimeout = queryOptions.timeout ?? defaultTimeout;
+
             const result = await runQuery(
                 client,
                 config,
-                queryOptions.timeout ?? defaultTimeout,
+                queryTimeout,
                 () => {
                     destroy = true;
                 },
@@ -247,6 +286,14 @@ export function createClient(
     }
 
     /**
+     * Get the number of manually acquired clients that haven't been released.
+     * Useful for monitoring connection leaks.
+     */
+    function getActiveManualClientCount(): number {
+        return manualClients.size;
+    }
+
+    /**
      * Create a named prepared-statement handle. PostgreSQL caches the parsed
      * statement per connection, so the handle is safe to reuse across calls.
      */
@@ -279,5 +326,6 @@ export function createClient(
         prepare,
         prepared,
         hooks,
+        getActiveManualClientCount,
     };
 }

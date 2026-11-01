@@ -41,6 +41,14 @@ export function raw(text: string): QueryFragment {
     return makeFragment(String(text), []);
 }
 
+/**
+ * Create a safe identifier fragment. This properly quotes the identifier
+ * to prevent SQL injection when using trusted input.
+ *
+ * @example
+ * sql`SELECT * FROM ${identifier('users')}`
+ * // => SELECT * FROM "users"
+ */
 export function identifier(name: string): QueryFragment {
     return raw(quoteIdent(name));
 }
@@ -120,6 +128,7 @@ sql.join = function join(values: QueryLike | QueryLike[], separator = ", "): Que
     let text = "";
 
     if (items.length === 0) {
+        // Empty arrays produce FALSE for IN clauses
         return makeFragment("FALSE", []);
     }
 
@@ -156,6 +165,243 @@ sql.join = function join(values: QueryLike | QueryLike[], separator = ", "): Que
 
     return makeFragment(text, params);
 } as JoinFn;
+
+// ==================== Window Function Helpers ====================
+
+/**
+ * Create a ROW_NUMBER() window function.
+ *
+ * @example
+ * sql`ROW_NUMBER() OVER (PARTITION BY ${'dept'} ORDER BY ${'salary'} DESC)`
+ */
+export function rowNumber(partitionBy?: string[], orderBy?: string[]): QueryFragment {
+    const parts: string[] = ["ROW_NUMBER() OVER ("];
+    
+    if (partitionBy && partitionBy.length > 0) {
+        parts.push(`PARTITION BY ${partitionBy.map(p => quoteIdent(p)).join(", ")}`);
+    }
+    
+    if (orderBy && orderBy.length > 0) {
+        parts.push(`ORDER BY ${orderBy.map(o => quoteIdent(o)).join(", ")}`);
+    }
+    
+    parts.push(")");
+    return raw(parts.join(" "));
+}
+
+/**
+ * Create a RANK() window function.
+ */
+export function rank(partitionBy?: string[], orderBy?: string[]): QueryFragment {
+    const parts: string[] = ["RANK() OVER ("];
+    
+    if (partitionBy && partitionBy.length > 0) {
+        parts.push(`PARTITION BY ${partitionBy.map(p => quoteIdent(p)).join(", ")}`);
+    }
+    
+    if (orderBy && orderBy.length > 0) {
+        parts.push(`ORDER BY ${orderBy.map(o => quoteIdent(o)).join(", ")}`);
+    }
+    
+    parts.push(")");
+    return raw(parts.join(" "));
+}
+
+/**
+ * Create a DENSE_RANK() window function.
+ */
+export function denseRank(partitionBy?: string[], orderBy?: string[]): QueryFragment {
+    const parts: string[] = ["DENSE_RANK() OVER ("];
+    
+    if (partitionBy && partitionBy.length > 0) {
+        parts.push(`PARTITION BY ${partitionBy.map(p => quoteIdent(p)).join(", ")}`);
+    }
+    
+    if (orderBy && orderBy.length > 0) {
+        parts.push(`ORDER BY ${orderBy.map(o => quoteIdent(o)).join(", ")}`);
+    }
+    
+    parts.push(")");
+    return raw(parts.join(" "));
+}
+
+/**
+ * Create a ROW_NUMBER(), RANK(), or DENSE_RANK() with a named window.
+ *
+ * @example
+ * const w = sql.window('ranking', { partitionBy: ['dept'], orderBy: ['salary DESC'] });
+ * sql`RANK() OVER ${w}`
+ */
+export function window(name: string, options: { partitionBy?: string[]; orderBy?: string[] }): QueryFragment {
+    const parts: string[] = [quoteIdent(name)];
+    return raw(parts.join(" "));
+}
+
+// ==================== JSON Operator Helpers ====================
+
+/**
+ * Get JSON field as text.
+ *
+ * @example
+ * sql`${jsonGetText('metadata', 'color')} = 'blue'`
+ */
+export function jsonGetText(column: string, path: string): QueryFragment {
+    return raw(`${quoteIdent(column)}->>${quoteString(path)}`);
+}
+
+/**
+ * Get JSON field as JSON.
+ *
+ * @example
+ * sql`${jsonGet('metadata', 'color')} = '"blue"'`
+ */
+export function jsonGet(column: string, path: string): QueryFragment {
+    return raw(`${quoteIdent(column)}->${quoteString(path)}`);
+}
+
+/**
+ * Check if JSON contains value (superset of).
+ *
+ * @example
+ * sql`${jsonContains('metadata', { color: 'blue' })}`
+ */
+export function jsonContains(column: string, value: unknown): QueryFragment {
+    return raw(`${quoteIdent(column)} @> $1`);
+}
+
+/**
+ * Check if JSON is contained in value (subset of).
+ *
+ * @example
+ * sql`${jsonContained('metadata', { color: 'blue', size: 'large' })}`
+ */
+export function jsonContained(column: string, value: unknown): QueryFragment {
+    return raw(`${quoteIdent(column)} <@ $1`);
+}
+
+/**
+ * Get JSON array length.
+ *
+ * @example
+ * sql`${jsonArrayLength('items')} > 0`
+ */
+export function jsonArrayLength(column: string): QueryFragment {
+    return raw(`jsonb_array_length(${quoteIdent(column)})`);
+}
+
+/**
+ * Get JSON object keys.
+ *
+ * @example
+ * sql`${jsonObjectKeys('metadata')}`
+ */
+export function jsonObjectKeys(column: string): QueryFragment {
+    return raw(`jsonb_object_keys(${quoteIdent(column)})`);
+}
+
+/**
+ * Get JSON field by path (PostgreSQL jsonb_path_query).
+ *
+ * @example
+ * sql`${jsonPath('data', '$.users[*].name')} = 'John'`
+ */
+export function jsonPath(column: string, path: string): QueryFragment {
+    return raw(`jsonb_path_query(${quoteIdent(column)}, ${quoteString(path)})`);
+}
+
+/**
+ * Quote a string value for use in SQL (for dynamic SQL generation, not for parameters).
+ * WARNING: Only use this with trusted input! For user input, use parameterized queries.
+ */
+export function quoteString(value: string): string {
+    if (typeof value !== "string") {
+        return String(value);
+    }
+    return `'${value.replace(/'/g, "''")}'`;
+}
+
+// ==================== CASE Expression Helper ====================
+
+/**
+ * Create a CASE expression with WHEN/THEN/ELSE.
+ *
+ * @example
+ * sql`CASE WHEN ${status} = 'active' THEN 'Active' ELSE 'Inactive' END`
+ */
+export function caseWhen(
+    conditions: Array<{ when: string | QueryFragment; then: unknown }>,
+    elseValue?: unknown
+): QueryFragment {
+    const params: unknown[] = [];
+    const parts: string[] = ["CASE"];
+
+    for (const { when, then } of conditions) {
+        if (isFragment(when)) {
+            parts.push(`WHEN ${when.text}`);
+            params.push(...when.values);
+        } else {
+            parts.push(`WHEN ${when}`);
+        }
+        
+        if (isFragment(then)) {
+            parts.push(`THEN ${then.text}`);
+            params.push(...then.values);
+        } else {
+            parts.push(`THEN $${params.length + 1}`);
+            params.push(then);
+        }
+    }
+
+    if (elseValue !== undefined) {
+        if (isFragment(elseValue)) {
+            parts.push(`ELSE ${elseValue.text}`);
+            params.push(...elseValue.values);
+        } else {
+            parts.push(`ELSE $${params.length + 1}`);
+            params.push(elseValue);
+        }
+    }
+
+    parts.push("END");
+    return makeFragment(parts.join(" "), params);
+}
+
+// ==================== Aggregation Helpers ====================
+
+/**
+ * Create a COUNT DISTINCT expression.
+ */
+export function countDistinct(column: string): QueryFragment {
+    return raw(`COUNT(DISTINCT ${quoteIdent(column)})`);
+}
+
+/**
+ * Create a string aggregation with delimiter.
+ */
+export function stringAgg(column: string, delimiter: string): QueryFragment {
+    return raw(`STRING_AGG(${quoteIdent(column)}, ${quoteString(delimiter)})`);
+}
+
+/**
+ * Create an array aggregation.
+ */
+export function arrayAgg(column: string): QueryFragment {
+    return raw(`ARRAY_AGG(${quoteIdent(column)})`);
+}
+
+/**
+ * Create a JSON aggregation.
+ */
+export function jsonAgg(column: string): QueryFragment {
+    return raw(`JSON_AGG(${quoteIdent(column)})`);
+}
+
+/**
+ * Create a JSON object aggregation.
+ */
+export function jsonObjectAgg(key: string, value: string): QueryFragment {
+    return raw(`JSON_OBJECT_AGG(${quoteIdent(key)}, ${quoteIdent(value)})`);
+}
 
 export type { QueryFragment } from "../types.js";
 export type { SqlFn } from "../types.js";

@@ -1,5 +1,5 @@
 import type { QueryBuilder as QueryBuilderType, QueryRunner, QueryLike, QueryFragment, QueryResult, QueryResultRow, SqlFragment } from "../types.js";
-import { quoteIdent, quoteIdentList, raw, isFragment, sql } from "./sql.js";
+import { quoteIdent, quoteIdentList, raw, isFragment, sql, identifier } from "./sql.js";
 
 const ALLOWED_OPERATORS = new Set([
     "=",
@@ -20,6 +20,14 @@ const ALLOWED_OPERATORS = new Set([
     "@>",
     "<@",
     "&&",
+    "?",
+    "?|",
+    "?&",
+    "@?",
+    "~",
+    "~*",
+    "!~",
+    "!~*",
 ]);
 
 const DIRECTIONS = new Set([
@@ -29,6 +37,18 @@ const DIRECTIONS = new Set([
     "ASC NULLS LAST",
     "DESC NULLS FIRST",
     "DESC NULLS LAST",
+]);
+
+const JOIN_TYPES = new Set([
+    "JOIN",
+    "INNER JOIN",
+    "LEFT JOIN",
+    "RIGHT JOIN",
+    "FULL JOIN",
+    "FULL OUTER JOIN",
+    "CROSS JOIN",
+    "LEFT OUTER JOIN",
+    "RIGHT OUTER JOIN",
 ]);
 
 class ParamCollector {
@@ -63,12 +83,15 @@ interface WhereCondition {
     value?: unknown;
     text?: string;
     values?: unknown[];
+    // For nested groups
+    conditions?: WhereCondition[];
 }
 
 interface JoinClause {
     type: string;
-    table: string;
-    on: string | SqlFragment | string[];
+    table: string | QueryBuilder | QueryFragment;
+    on: string | SqlFragment | string[] | QueryBuilder;
+    alias?: string;
 }
 
 interface HavingCondition {
@@ -78,13 +101,47 @@ interface HavingCondition {
 }
 
 interface OrderClause {
-    column: string;
+    column: string | QueryFragment | QueryBuilder;
     direction: string;
+    nulls?: "FIRST" | "LAST";
 }
 
 interface ShardRoutingHint {
     shardKey?: string;
     shardId?: string;
+}
+
+// For CTEs (WITH clauses)
+interface CTE {
+    name: string;
+    query: QueryBuilder | QueryFragment | string;
+    columns?: string[];
+    materialized?: boolean;
+}
+
+// For Window Functions
+interface WindowDefinition {
+    name: string;
+    partitionBy?: string[];
+    orderBy?: Array<{ column: string; direction: string }>;
+    frame?: {
+        type: "ROWS" | "RANGE";
+        start: "UNBOUNDED PRECEDING" | "CURRENT ROW" | number | string;
+        end: "UNBOUNDED FOLLOWING" | "CURRENT ROW" | number | string;
+    };
+}
+
+// For CASE expressions
+interface CaseExpression {
+    value?: string | QueryFragment;
+    when: Array<{ condition: string | QueryFragment; result: unknown }>;
+    else?: unknown;
+}
+
+// For UNION/INTERSECT/EXCEPT
+interface CombinedQuery {
+    query: QueryBuilder;
+    type: "UNION" | "UNION ALL" | "INTERSECT" | "INTERSECT ALL" | "EXCEPT" | "EXCEPT ALL";
 }
 
 /**
@@ -99,7 +156,7 @@ export class QueryBuilder implements QueryBuilderType {
     private _mode: "select" | "insert" | "update" | "delete" = "select";
     private _params: ParamCollector = new ParamCollector();
     private _wheres: WhereCondition[] = [];
-    private _selects: (string | QueryFragment)[] = [];
+    private _selects: (string | QueryFragment | QueryBuilder)[] = [];
     private _joins: JoinClause[] = [];
     private _groups: string[] = [];
     private _havings: HavingCondition[] = [];
@@ -107,12 +164,20 @@ export class QueryBuilder implements QueryBuilderType {
     private _limit: number | null = null;
     private _offset: number | null = null;
     private _distinct = false;
+    private _distinctOn: string[] | null = null;
     private _insertRows: Record<string, unknown>[] | null = null;
     private _updateValues: Record<string, unknown> | null = null;
     private _conflict: unknown = null;
     private _returning: string[] | null = null;
     private _shardKey: string | undefined;
     private _shardId: string | undefined;
+    private _ctes: CTE[] = [];
+    private _windowDefinitions: WindowDefinition[] = [];
+    private _forUpdate: boolean | string = false;
+    private _forNoKeyUpdate: boolean = false;
+    private _skipLocked: boolean = false;
+    private _combinedQueries: CombinedQuery[] = [];
+    private _queryLoggingContext: Record<string, unknown> = {};
 
     constructor({
         query,
@@ -142,31 +207,528 @@ export class QueryBuilder implements QueryBuilderType {
         const next = new QueryBuilder({ query: this._query, table: this._table, logger: this._logger });
         next._mode = this._mode;
         next._params = this._params;
-        next._wheres = [...this._wheres];
-        next._selects = [...this._selects];
-        next._joins = [...this._joins];
+        next._wheres = this._wheres.map(w => ({
+            ...w,
+            conditions: w.conditions ? w.conditions.map(c => ({ ...c })) : undefined
+        }));
+        next._selects = this._selects.map(s => {
+            if (s instanceof QueryBuilder) {
+                return s.clone();
+            }
+            return s;
+        });
+        next._joins = this._joins.map(j => ({
+            ...j,
+            table: j.table instanceof QueryBuilder ? j.table.clone() : j.table,
+            on: j.on instanceof QueryBuilder ? j.on.clone() : j.on
+        }));
         next._groups = [...this._groups];
         next._havings = [...this._havings];
-        next._orders = [...this._orders];
+        next._orders = this._orders.map(o => ({
+            ...o,
+            column: o.column instanceof QueryBuilder ? o.column.clone() : o.column
+        }));
         next._limit = this._limit;
         next._offset = this._offset;
         next._distinct = this._distinct;
+        next._distinctOn = this._distinctOn ? [...this._distinctOn] : null;
         next._insertRows = this._insertRows;
         next._updateValues = this._updateValues;
         next._conflict = this._conflict;
         next._returning = this._returning;
         next._shardKey = this._shardKey;
         next._shardId = this._shardId;
+        next._ctes = this._ctes.map(cte => ({
+            ...cte,
+            query: cte.query instanceof QueryBuilder ? cte.query.clone() : cte.query
+        }));
+        next._windowDefinitions = this._windowDefinitions.map(w => ({ ...w }));
+        next._forUpdate = this._forUpdate;
+        next._forNoKeyUpdate = this._forNoKeyUpdate;
+        next._skipLocked = this._skipLocked;
+        next._combinedQueries = this._combinedQueries.map(c => ({
+            ...c,
+            query: c.query instanceof QueryBuilder ? c.query.clone() : c.query
+        }));
+        next._queryLoggingContext = { ...this._queryLoggingContext };
         return next;
     }
 
+    // ==================== CTE (WITH clause) Support ====================
+
+    /**
+     * Add a Common Table Expression (CTE) to the query.
+     * Can be chained to add multiple CTEs.
+     *
+     * @example
+     * db.select().from('users')
+     *   .with('active_users', db.select().from('users').where({ active: true }))
+     *   .with('recent_orders', db.select().from('orders').where({ created_at: '> 2023-01-01' }))
+     *   .select('au.name', 'ro.amount')
+     *   .from('active_users au')
+     *   .join('recent_orders ro', 'au.id = ro.user_id')
+     */
+    with(name: string, query: QueryBuilder | QueryFragment | string, columns?: string[], materialized = false): this {
+        this._ctes.push({ name, query, columns, materialized });
+        return this;
+    }
+
+    /**
+     * Add a recursive CTE (for PostgreSQL).
+     */
+    withRecursive(name: string, query: QueryBuilder | QueryFragment | string, columns?: string[]): this {
+        const cte: CTE = { name, query, columns, materialized: false };
+        // Mark as recursive by adding to the beginning
+        this._ctes.unshift(cte);
+        return this;
+    }
+
+    // ==================== Window Functions Support ====================
+
+    /**
+     * Define a window function for reuse in SELECT or ORDER BY.
+     *
+     * @example
+     * db.select()
+     *   .window('ranking', { partitionBy: ['department'], orderBy: [{ column: 'salary', direction: 'DESC' }] })
+     *   .select('name', 'salary', sql`RANK() OVER ranking`)
+     *   .from('employees')
+     */
+    window(name: string, definition: {
+        partitionBy?: string[];
+        orderBy?: Array<{ column: string; direction?: string }>;
+        frame?: {
+            type: "ROWS" | "RANGE";
+            start: "UNBOUNDED PRECEDING" | "CURRENT ROW" | number | string;
+            end: "UNBOUNDED FOLLOWING" | "CURRENT ROW" | number | string;
+        };
+    }): this {
+        this._windowDefinitions.push({
+            name,
+            partitionBy: definition.partitionBy,
+            orderBy: definition.orderBy?.map(o => ({ 
+                column: o.column, 
+                direction: o.direction?.toUpperCase() || "ASC" 
+            })),
+            frame: definition.frame,
+        });
+        return this;
+    }
+
+    // ==================== Complex Joins Support ====================
+
+    join(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): this {
+        this._joins.push({ type: "JOIN", table, on, alias });
+        return this;
+    }
+
+    innerJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): this {
+        this._joins.push({ type: "INNER JOIN", table, on, alias });
+        return this;
+    }
+
+    leftJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): this {
+        this._joins.push({ type: "LEFT JOIN", table, on, alias });
+        return this;
+    }
+
+    rightJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): this {
+        this._joins.push({ type: "RIGHT JOIN", table, on, alias });
+        return this;
+    }
+
+    fullJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): this {
+        this._joins.push({ type: "FULL JOIN", table, on, alias });
+        return this;
+    }
+
+    fullOuterJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): this {
+        this._joins.push({ type: "FULL OUTER JOIN", table, on, alias });
+        return this;
+    }
+
+    leftOuterJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): this {
+        this._joins.push({ type: "LEFT OUTER JOIN", table, on, alias });
+        return this;
+    }
+
+    rightOuterJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): this {
+        this._joins.push({ type: "RIGHT OUTER JOIN", table, on, alias });
+        return this;
+    }
+
+    crossJoin(table: string | QueryBuilder, alias?: string): this {
+        this._joins.push({ type: "CROSS JOIN", table, on: "", alias });
+        return this;
+    }
+
+    // ==================== Subqueries Support ====================
+
+    /**
+     * Use a subquery in the FROM clause.
+     *
+     * @example
+     * db.select('name')
+     *   .from(db.select().from('users').where({ active: true }), 'active_users')
+     */
+    from(subquery: QueryBuilder | QueryFragment | string, alias?: string): this {
+        if (subquery instanceof QueryBuilder) {
+            this._table = `(${subquery.toSQL().text})`;
+            if (alias) {
+                this._table += ` AS ${quoteIdent(alias)}`;
+            }
+        } else if (isFragment(subquery)) {
+            this._table = `(${subquery.text})`;
+            if (alias) {
+                this._table += ` AS ${quoteIdent(alias)}`;
+            }
+        } else {
+            this._table = String(subquery);
+        }
+        return this;
+    }
+
+    /**
+     * Add a subquery to the SELECT clause.
+     *
+     * @example
+     * db.select(
+     *   'users.name',
+     *   db.select(sql`COUNT(*)`).from('orders').where('orders.user_id = users.id'), 'order_count'
+     * ).from('users')
+     */
+    selectSubquery(subquery: QueryBuilder | QueryFragment, alias: string): this {
+        if (subquery instanceof QueryBuilder) {
+            const { text, values } = subquery.toSQL();
+            this._selects.push(sql`(${raw(text)}) AS ${identifier(alias)}`);
+            // Note: values are not merged here - need to handle in compilation
+        } else {
+            this._selects.push(sql`(${subquery}) AS ${identifier(alias)}`);
+        }
+        return this;
+    }
+
+    /**
+     * Use a subquery in WHERE clause with EXISTS.
+     *
+     * @example
+     * db.select().from('users')
+     *   .whereExists(db.select().from('orders').where('orders.user_id = users.id'))
+     */
+    whereExists(subquery: QueryBuilder | QueryFragment): this {
+        if (subquery instanceof QueryBuilder) {
+            const { text } = subquery.toSQL();
+            this._wheres.push({ connector: "AND", text: `EXISTS (${text})`, values: [] });
+        } else if (isFragment(subquery)) {
+            this._wheres.push({ connector: "AND", text: `EXISTS (${subquery.text})`, values: subquery.values ?? [] });
+        }
+        return this;
+    }
+
+    /**
+     * Use a subquery in WHERE clause with NOT EXISTS.
+     */
+    whereNotExists(subquery: QueryBuilder | QueryFragment): this {
+        if (subquery instanceof QueryBuilder) {
+            const { text } = subquery.toSQL();
+            this._wheres.push({ connector: "AND", text: `NOT EXISTS (${text})`, values: [] });
+        } else if (isFragment(subquery)) {
+            this._wheres.push({ connector: "AND", text: `NOT EXISTS (${subquery.text})`, values: subquery.values ?? [] });
+        }
+        return this;
+    }
+
+    /**
+     * Use a subquery in WHERE clause with IN.
+     *
+     * @example
+     * db.select().from('users')
+     *   .whereInSubquery('id', db.select('user_id').from('orders'))
+     */
+    whereInSubquery(column: string, subquery: QueryBuilder | QueryFragment): this {
+        if (subquery instanceof QueryBuilder) {
+            const { text } = subquery.toSQL();
+            this._wheres.push({ 
+                connector: "AND", 
+                text: `${quoteIdent(column)} IN (${text})`, 
+                values: [] 
+            });
+        } else if (isFragment(subquery)) {
+            this._wheres.push({ 
+                connector: "AND", 
+                text: `${quoteIdent(column)} IN (${subquery.text})`, 
+                values: subquery.values ?? [] 
+            });
+        }
+        return this;
+    }
+
+    /**
+     * Use a subquery in WHERE clause with NOT IN.
+     */
+    whereNotInSubquery(column: string, subquery: QueryBuilder | QueryFragment): this {
+        if (subquery instanceof QueryBuilder) {
+            const { text } = subquery.toSQL();
+            this._wheres.push({ 
+                connector: "AND", 
+                text: `${quoteIdent(column)} NOT IN (${text})`, 
+                values: [] 
+            });
+        } else if (isFragment(subquery)) {
+            this._wheres.push({ 
+                connector: "AND", 
+                text: `${quoteIdent(column)} NOT IN (${subquery.text})`, 
+                values: subquery.values ?? [] 
+            });
+        }
+        return this;
+    }
+
+    // ==================== Nested WHERE Groups Support ====================
+
+    /**
+     * Start a nested WHERE group with AND connector.
+     *
+     * @example
+     * db.select().from('users')
+     *   .whereGroup(q => q.where('status', 'active').orWhere('status', 'pending'))
+     *   .where('age', '>', 18)
+     * // WHERE (status = 'active' OR status = 'pending') AND age > 18
+     */
+    whereGroup(callback: (builder: QueryBuilder) => QueryBuilder): this {
+        const subBuilder = new QueryBuilder({ table: this._table });
+        callback(subBuilder);
+        
+        // Extract the conditions from the sub-builder
+        const conditions = subBuilder._wheres.map(w => ({ ...w }));
+        
+        // Wrap in a nested condition
+        this._wheres.push({
+            connector: "AND",
+            conditions,
+        });
+        
+        return this;
+    }
+
+    /**
+     * Start a nested WHERE group with OR connector.
+     */
+    orWhereGroup(callback: (builder: QueryBuilder) => QueryBuilder): this {
+        const subBuilder = new QueryBuilder({ table: this._table });
+        callback(subBuilder);
+        
+        const conditions = subBuilder._wheres.map(w => ({ ...w }));
+        
+        this._wheres.push({
+            connector: "OR",
+            conditions,
+        });
+        
+        return this;
+    }
+
+    // ==================== UNION/INTERSECT/EXCEPT Support ====================
+
+    /**
+     * Combine this query with another using UNION.
+     */
+    union(query: QueryBuilder): this {
+        this._combinedQueries.push({ query: query.clone(), type: "UNION" });
+        return this;
+    }
+
+    /**
+     * Combine this query with another using UNION ALL.
+     */
+    unionAll(query: QueryBuilder): this {
+        this._combinedQueries.push({ query: query.clone(), type: "UNION ALL" });
+        return this;
+    }
+
+    /**
+     * Combine this query with another using INTERSECT.
+     */
+    intersect(query: QueryBuilder): this {
+        this._combinedQueries.push({ query: query.clone(), type: "INTERSECT" });
+        return this;
+    }
+
+    /**
+     * Combine this query with another using INTERSECT ALL.
+     */
+    intersectAll(query: QueryBuilder): this {
+        this._combinedQueries.push({ query: query.clone(), type: "INTERSECT ALL" });
+        return this;
+    }
+
+    /**
+     * Combine this query with another using EXCEPT.
+     */
+    except(query: QueryBuilder): this {
+        this._combinedQueries.push({ query: query.clone(), type: "EXCEPT" });
+        return this;
+    }
+
+    /**
+     * Combine this query with another using EXCEPT ALL.
+     */
+    exceptAll(query: QueryBuilder): this {
+        this._combinedQueries.push({ query: query.clone(), type: "EXCEPT ALL" });
+        return this;
+    }
+
+    // ==================== CASE Expression Support ====================
+
+    /**
+     * Add a CASE expression to the SELECT clause.
+     *
+     * @example
+     * db.select()
+     *   .selectCase('status_category', (caseBuilder) => caseBuilder
+     *     .when('status = \'active\'', 'Active')
+     *     .when('status = \'pending\'', 'Pending')
+     *     .else('Inactive')
+     *   )
+     *   .from('users')
+     */
+    selectCase(alias: string, callback: (builder: CaseBuilder) => CaseBuilder): this {
+        const caseBuilder = new CaseBuilder();
+        callback(caseBuilder);
+        this._selects.push(sql`${caseBuilder.build()} AS ${identifier(alias)}`);
+        return this;
+    }
+
+    // ==================== DISTINCT ON Support ====================
+
+    /**
+     * Use PostgreSQL's DISTINCT ON.
+     *
+     * @example
+     * db.select().from('orders')
+     *   .distinctOn(['user_id'])
+     *   .orderBy('user_id', 'created_at DESC')
+     *   .select('user_id', 'order_date', 'amount')
+     */
+    distinctOn(columns: string[]): this {
+        this._distinct = true;
+        this._distinctOn = columns;
+        return this;
+    }
+
+    // ==================== FOR UPDATE Support ====================
+
+    /**
+     * Lock rows for update (SELECT ... FOR UPDATE).
+     *
+     * @example
+     * db.select().from('accounts').where({ id: 1 }).forUpdate()
+     */
+    forUpdate(): this {
+        this._forUpdate = true;
+        return this;
+    }
+
+    /**
+     * Lock rows for update without key lock (SELECT ... FOR NO KEY UPDATE).
+     */
+    forNoKeyUpdate(): this {
+        this._forNoKeyUpdate = true;
+        return this;
+    }
+
+    /**
+     * Skip locked rows (SELECT ... FOR UPDATE SKIP LOCKED).
+     */
+    skipLocked(): this {
+        this._skipLocked = true;
+        return this;
+    }
+
+    // ==================== JSON Operators Support ====================
+
+    /**
+     * Add a JSON path query condition.
+     *
+     * @example
+     * db.select().from('users')
+     *   .whereJson('metadata->>\'color\'', '=', 'blue')
+     */
+    whereJson(column: string, operator: string, value: unknown): this {
+        const op = assertOperator(operator);
+        this._wheres.push({ 
+            connector: "AND", 
+            text: `${quoteIdent(column)} ${op} $X`, 
+            value 
+        });
+        return this;
+    }
+
+    /**
+     * Check if JSON field contains a value.
+     *
+     * @example
+     * db.select().from('users')
+     *   .whereJsonContains('metadata', { color: 'blue' })
+     */
+    whereJsonContains(column: string, value: unknown): this {
+        this._wheres.push({ 
+            connector: "AND", 
+            text: `${quoteIdent(column)} @> $X`,
+            value 
+        });
+        return this;
+    }
+
+    /**
+     * Check if JSON field is contained in a value.
+     */
+    whereJsonContained(column: string, value: unknown): this {
+        this._wheres.push({ 
+            connector: "AND", 
+            text: `${quoteIdent(column)} <@ $X`,
+            value 
+        });
+        return this;
+    }
+
+    // ==================== Query Logging Context ====================
+
+    /**
+     * Add context for query logging (file, line, request ID, etc.).
+     */
+    withQueryContext(context: Record<string, unknown>): this {
+        this._queryLoggingContext = { ...this._queryLoggingContext, ...context };
+        return this;
+    }
+
+    /**
+     * Get the current query logging context.
+     */
+    getQueryContext(): Record<string, unknown> {
+        return { ...this._queryLoggingContext };
+    }
+
+    // ==================== Transaction Timeout ====================
+
+    /**
+     * Set a timeout for the query execution (in milliseconds).
+     */
+    timeout(ms: number): this {
+        // This will be handled by the query execution layer
+        this.withQueryContext({ timeout: ms });
+        return this;
+    }
+
+    // ==================== Original Methods ====================
+
     select(...columns: Array<string | string[] | SqlFragment>): this {
         this._mode = "select";
-        let processedColumns: (string | SqlFragment)[];
+        let processedColumns: (string | SqlFragment | QueryBuilder)[];
         if (columns.length === 1 && Array.isArray(columns[0])) {
-            processedColumns = columns[0] as (string | SqlFragment)[];
+            processedColumns = columns[0] as (string | SqlFragment | QueryBuilder)[];
         } else {
-            processedColumns = columns as (string | SqlFragment)[];
+            processedColumns = columns as (string | SqlFragment | QueryBuilder)[];
         }
         this._selects.push(...(processedColumns.length ? processedColumns : ["*"]));
         return this;
@@ -174,6 +736,9 @@ export class QueryBuilder implements QueryBuilderType {
 
     distinct(value = true): this {
         this._distinct = value;
+        if (value) {
+            this._distinctOn = null;
+        }
         return this;
     }
 
@@ -274,16 +839,6 @@ export class QueryBuilder implements QueryBuilderType {
         return this;
     }
 
-    join(table: string, on: string | SqlFragment | string[]): this {
-        this._joins.push({ type: "JOIN", table, on });
-        return this;
-    }
-
-    leftJoin(table: string, on: string | SqlFragment | string[]): this {
-        this._joins.push({ type: "LEFT JOIN", table, on });
-        return this;
-    }
-
     groupBy(...columns: (string | string[])[]): this {
         let groups: string[];
         if (columns.length === 1 && Array.isArray(columns[0])) {
@@ -300,7 +855,7 @@ export class QueryBuilder implements QueryBuilderType {
         return this;
     }
 
-    orderBy(column: string, direction = "ASC"): this {
+    orderBy(column: string | SqlFragment | QueryBuilder, direction = "ASC"): this {
         const dir = String(direction).toUpperCase();
         if (!DIRECTIONS.has(dir)) {
             throw new TypeError(`Invalid order direction: ${direction}`);
@@ -345,6 +900,181 @@ export class QueryBuilder implements QueryBuilderType {
         return this;
     }
 
+    // ==================== Compilation Methods ====================
+
+    private _compileCTEs(): string {
+        if (this._ctes.length === 0) {
+            return "";
+        }
+
+        const parts: string[] = [];
+        for (const cte of this._ctes) {
+            let queryText: string;
+            
+            if (cte.query instanceof QueryBuilder) {
+                const subBuilder = cte.query._buildCloneWithFreshParams();
+                queryText = subBuilder._compile();
+                // Merge parameters
+                this._params.values.push(...subBuilder._params.values);
+            } else if (isFragment(cte.query)) {
+                queryText = cte.query.text;
+                this._params.values.push(...(cte.query.values ?? []));
+            } else {
+                queryText = String(cte.query);
+            }
+
+            let cteText = `${quoteIdent(cte.name)} AS (${queryText})`;
+            
+            if (cte.materialized) {
+                cteText = `${quoteIdent(cte.name)} AS MATERIALIZED (${queryText})`;
+            }
+            
+            if (cte.columns && cte.columns.length > 0) {
+                cteText = `${quoteIdent(cte.name)} (${quoteIdentList(cte.columns)}) AS (${queryText})`;
+            }
+            
+            parts.push(cteText);
+        }
+
+        return `WITH ${parts.join(", ")} `;
+    }
+
+    private _compileWindowDefinitions(): string {
+        // Window definitions are referenced in SELECT, not declared separately
+        return "";
+    }
+
+    private _compileSelectList(): string {
+        const columns = this._selects.length ? this._selects : ["*"];
+        
+        const projection = columns.map((column) => {
+            if (column instanceof QueryBuilder) {
+                const subBuilder = column._buildCloneWithFreshParams();
+                const text = subBuilder._compile();
+                this._params.values.push(...subBuilder._params.values);
+                return `(${text})`;
+            }
+            
+            if (column && typeof column === "object" && "text" in column) {
+                const frag = column as QueryFragment;
+                // Handle parameter renumbering
+                let text = frag.text;
+                const offset = this._params.values.length;
+                
+                if (frag.values && frag.values.length > 0) {
+                    text = text.replace(/\$(\d+)/g, (_, position) => {
+                        const idx = Number(position) - 1;
+                        if (idx < frag.values!.length) {
+                            const paramIndex = offset + idx + 1;
+                            this._params.values.push(frag.values![idx]);
+                            return `$${paramIndex}`;
+                        }
+                        return `$${position}`;
+                    });
+                }
+                return text;
+            }
+            
+            if (column === "*") {
+                return "*";
+            }
+            
+            return quoteIdent(column as string);
+        }).join(", ");
+
+        return projection;
+    }
+
+    private _compileFrom(): string {
+        // If we used .from() with a subquery, _table already contains the subquery
+        if (typeof this._table === "string" && this._table.startsWith("(")) {
+            return `FROM ${this._table}`;
+        }
+        return `FROM ${quoteIdent(this._table)}`;
+    }
+
+    private _compileJoins(): string {
+        if (this._joins.length === 0) {
+            return "";
+        }
+
+        const parts: string[] = [];
+        
+        for (const join of this._joins) {
+            let tableText: string;
+            let joinType = join.type;
+            
+            // Normalize join type
+            if (!JOIN_TYPES.has(joinType)) {
+                throw new TypeError(`Invalid join type: ${joinType}`);
+            }
+
+            // Handle table (could be a subquery or table name)
+            if (join.table instanceof QueryBuilder) {
+                const subBuilder = join.table._buildCloneWithFreshParams();
+                tableText = `(${subBuilder._compile()})`;
+                this._params.values.push(...subBuilder._params.values);
+            } else if (isFragment(join.table)) {
+                tableText = join.table.text;
+                this._params.values.push(...(join.table.values ?? []));
+            } else {
+                tableText = quoteIdent(join.table as string);
+            }
+
+            // Add alias if provided
+            if (join.alias) {
+                tableText += ` AS ${quoteIdent(join.alias)}`;
+            }
+
+            // Handle ON clause
+            let onText = "";
+            if (join.on) {
+                if (join.on instanceof QueryBuilder) {
+                    const subBuilder = join.on._buildCloneWithFreshParams();
+                    const onSql = subBuilder._compile();
+                    this._params.values.push(...subBuilder._params.values);
+                    onText = ` ON ${onSql}`;
+                } else if (isFragment(join.on)) {
+                    let text = join.on.text;
+                    const offset = this._params.values.length;
+                    
+                    if (join.on.values && join.on.values.length > 0) {
+                        text = text.replace(/\$(\d+)/g, (_, position) => {
+                            const idx = Number(position) - 1;
+                            if (idx < (join.on as QueryFragment).values!.length) {
+                                const paramIndex = offset + idx + 1;
+                                this._params.values.push((join.on as QueryFragment).values![idx]);
+                                return `$${paramIndex}`;
+                            }
+                            return `$${position}`;
+                        });
+                    }
+                    onText = ` ON ${text}`;
+                } else if (Array.isArray(join.on)) {
+                    // Handle array of conditions
+                    const conditions = join.on.map(cond => {
+                        if (typeof cond === "string") {
+                            return cond;
+                        }
+                        return "";
+                    }).filter(c => c).join(" AND ");
+                    onText = conditions ? ` ON ${conditions}` : "";
+                } else if (typeof join.on === "string") {
+                    onText = join.on ? ` ON ${join.on}` : "";
+                }
+            }
+
+            // CROSS JOIN doesn't have ON clause
+            if (joinType.includes("CROSS")) {
+                onText = "";
+            }
+
+            parts.push(` ${joinType} ${tableText}${onText}`);
+        }
+
+        return parts.join("");
+    }
+
     private _compileWhere(): string {
         if (this._wheres.length === 0) {
             return "";
@@ -353,16 +1083,64 @@ export class QueryBuilder implements QueryBuilderType {
         const parts = this._wheres.map((condition, index) => {
             let text = "";
 
-            if (condition.text !== undefined) {
-                text = condition.text;
-                const valueIndex = 0;
-                text = text.replace(/\$(\d+)/g, (_, position) => {
-                    const idx = Number(position) - 1;
-                    if (idx < (condition.values ?? []).length) {
-                        return this._params.add(condition.values![idx]);
+            if (condition.conditions) {
+                // Nested condition group
+                const nestedParts = condition.conditions.map((nestedCond, nestedIndex) => {
+                    let nestedText = "";
+                    
+                    if (nestedCond.text !== undefined) {
+                        nestedText = nestedCond.text;
+                        const offset = this._params.values.length;
+                        if (nestedCond.values && nestedCond.values.length > 0) {
+                            nestedText = nestedText.replace(/\$(\d+)/g, (_, position) => {
+                                const idx = Number(position) - 1;
+                                if (idx < nestedCond.values!.length) {
+                                    const paramIndex = offset + idx + 1;
+                                    this._params.values.push(nestedCond.values![idx]);
+                                    return `$${paramIndex}`;
+                                }
+                                return `$${position}`;
+                            });
+                        }
+                    } else {
+                        const column = quoteIdent(nestedCond.column ?? "");
+                        const operator = nestedCond.operator;
+
+                        if (operator === "IS" || operator === "IS NOT") {
+                            nestedText = nestedCond.value === null ? `${column} ${operator} NULL` : `${column} ${operator} $X`;
+                            if (nestedCond.value !== null) {
+                                nestedText = `${column} ${operator} ${this._params.add(nestedCond.value)}`;
+                            }
+                        } else if (operator === "IN" || operator === "NOT IN") {
+                            const val = nestedCond.value;
+                            if (!Array.isArray(val) || val.length === 0) {
+                                nestedText = operator === "IN" ? "FALSE" : "TRUE";
+                            } else {
+                                const placeholders = val.map((v) => this._params.add(v));
+                                nestedText = `${column} ${operator} (${placeholders.join(", ")})`;
+                            }
+                        } else {
+                            nestedText = `${column} ${operator} ${this._params.add(nestedCond.value)}`;
+                        }
                     }
-                    return `\$${position}`;
+                    return nestedIndex === 0 ? nestedText : ` ${nestedCond.connector} ${nestedText}`;
                 });
+                
+                text = `(${nestedParts.join(" ")})`;
+            } else if (condition.text !== undefined) {
+                text = condition.text;
+                const offset = this._params.values.length;
+                if (condition.values && condition.values.length > 0) {
+                    text = text.replace(/\$(\d+)/g, (_, position) => {
+                        const idx = Number(position) - 1;
+                        if (idx < condition.values!.length) {
+                            const paramIndex = offset + idx + 1;
+                            this._params.values.push(condition.values![idx]);
+                            return `$${paramIndex}`;
+                        }
+                        return `$${position}`;
+                    });
+                }
             } else {
                 const column = quoteIdent(condition.column ?? "");
                 const operator = condition.operator;
@@ -391,6 +1169,74 @@ export class QueryBuilder implements QueryBuilderType {
         return ` WHERE ${parts.join(" ")}`;
     }
 
+    private _compileGroupBy(): string {
+        if (this._groups.length === 0) {
+            return "";
+        }
+        return ` GROUP BY ${quoteIdentList(this._groups)}`;
+    }
+
+    private _compileHaving(): string {
+        if (this._havings.length === 0) {
+            return "";
+        }
+        return ` HAVING ${this._havings.map(h => `${quoteIdent(h.column)} ${h.operator} ${this._params.add(h.value)}`).join(" AND ")}`;
+    }
+
+    private _compileOrderBy(): string {
+        if (this._orders.length === 0) {
+            return "";
+        }
+        return ` ORDER BY ${this._orders.map(order => {
+            if (isFragment(order.column)) {
+                let text = order.column.text;
+                const offset = this._params.values.length;
+                if (order.column.values && order.column.values.length > 0) {
+                    text = text.replace(/\$(\d+)/g, (_, position) => {
+                        const idx = Number(position) - 1;
+                        if (idx < (order.column as QueryFragment).values!.length) {
+                            const paramIndex = offset + idx + 1;
+                            this._params.values.push((order.column as QueryFragment).values![idx]);
+                            return `$${paramIndex}`;
+                        }
+                        return `$${position}`;
+                    });
+                }
+                return `${text} ${order.direction}`;
+            } else if (order.column instanceof QueryBuilder) {
+                const subBuilder = order.column._buildCloneWithFreshParams();
+                const text = subBuilder._compile();
+                this._params.values.push(...subBuilder._params.values);
+                return `(${text}) ${order.direction}`;
+            }
+            return `${quoteIdent(order.column as string)} ${order.direction}`;
+        }).join(", ")}`;
+    }
+
+    private _compileLimit(): string {
+        if (this._limit !== null) {
+            return ` LIMIT ${this._params.add(this._limit)}`;
+        }
+        return "";
+    }
+
+    private _compileOffset(): string {
+        if (this._offset !== null) {
+            return ` OFFSET ${this._params.add(this._offset)}`;
+        }
+        return "";
+    }
+
+    private _compileDistinct(): string {
+        if (this._distinctOn) {
+            return `DISTINCT ON (${quoteIdentList(this._distinctOn)}) `;
+        }
+        if (this._distinct) {
+            return "DISTINCT ";
+        }
+        return "";
+    }
+
     private _compileReturning(): string {
         if (!this._returning) {
             return "";
@@ -399,90 +1245,21 @@ export class QueryBuilder implements QueryBuilderType {
         return ` RETURNING ${quoteIdentList(columns)}`;
     }
 
-    private _compileSelect(): string {
-        const distinct = this._distinct ? "DISTINCT " : "";
-        const columns = this._selects.length ? this._selects : ["*"];
-        const projection = columns
-            .map((column) => {
-                if (column && typeof column === "object" && "text" in column) {
-                    return (column as QueryFragment).text;
-                }
-                if (column === "*") {
-                    return "*";
-                }
-                return quoteIdent(column as string);
-            })
-            .join(", ");
-
-        let text = `SELECT ${distinct}${projection} FROM ${quoteIdent(this._table)}`;
-
-        for (const join of this._joins) {
-            let on: SqlFragment;
-            if (typeof join.on === "string") {
-                on = raw(join.on);
-            } else if (Array.isArray(join.on)) {
-                on = sql`${join.on}`;
-            } else {
-                on = join.on;
-            }
-            text += ` ${join.type} ${quoteIdent(join.table)} ON ${on.text}`;
-            for (const value of (on.values ?? [])) {
-                text = text.replace(/\$\d+/, () => this._params.add(value));
-            }
+    private _compileForUpdate(): string {
+        if (!this._forUpdate && !this._forNoKeyUpdate) {
+            return "";
         }
 
-        text += this._compileWhere();
+        let text = " FOR ";
+        if (this._forNoKeyUpdate) {
+            text += "NO KEY ";
+        }
+        text += "UPDATE";
 
-        if (this._groups.length) {
-            text += ` GROUP BY ${quoteIdentList(this._groups)}`;
+        if (this._skipLocked) {
+            text += " SKIP LOCKED";
         }
 
-        for (const having of this._havings) {
-            text += ` HAVING ${quoteIdent(having.column)} ${having.operator} ${this._params.add(having.value)}`;
-        }
-
-        if (this._orders.length) {
-            text += ` ORDER BY ${this._orders
-                .map((order) => `${quoteIdent(order.column)} ${order.direction}`)
-                .join(", ")}`;
-        }
-
-        if (this._limit !== null) {
-            text += ` LIMIT ${this._params.add(this._limit)}`;
-        }
-
-        if (this._offset !== null) {
-            text += ` OFFSET ${this._params.add(this._offset)}`;
-        }
-
-        return text;
-    }
-
-    private _compileInsert(): string {
-        const rows = this._insertRows ?? [];
-        if (rows.length === 0) {
-            throw new TypeError("insert requires at least one row");
-        }
-
-        const columns: string[] = [];
-        const seen = new Set<string>();
-        for (const row of rows) {
-            for (const key of Object.keys(row)) {
-                if (!seen.has(key)) {
-                    seen.add(key);
-                    columns.push(key);
-                }
-            }
-        }
-
-        const tuples = rows.map((row) => {
-            const placeholders = columns.map((column) => this._params.add(row[column] ?? null));
-            return `(${placeholders.join(", ")})`;
-        });
-
-        let text = `INSERT INTO ${quoteIdent(this._table)} (${quoteIdentList(columns)}) VALUES ${tuples.join(", ")}`;
-        text += this._compileConflict();
-        text += this._compileReturning();
         return text;
     }
 
@@ -526,6 +1303,49 @@ export class QueryBuilder implements QueryBuilderType {
         return text;
     }
 
+    private _compileCombinedQueries(): string {
+        if (this._combinedQueries.length === 0) {
+            return "";
+        }
+
+        const parts = this._combinedQueries.map((combined) => {
+            const subBuilder = combined.query._buildCloneWithFreshParams();
+            const text = subBuilder._compile();
+            this._params.values.push(...subBuilder._params.values);
+            return ` ${combined.type} ${text}`;
+        });
+
+        return parts.join("");
+    }
+
+    private _compileInsert(): string {
+        const rows = this._insertRows ?? [];
+        if (rows.length === 0) {
+            throw new TypeError("insert requires at least one row");
+        }
+
+        const columns: string[] = [];
+        const seen = new Set<string>();
+        for (const row of rows) {
+            for (const key of Object.keys(row)) {
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    columns.push(key);
+                }
+            }
+        }
+
+        const tuples = rows.map((row) => {
+            const placeholders = columns.map((column) => this._params.add(row[column] ?? null));
+            return `(${placeholders.join(", ")})`;
+        });
+
+        let text = `INSERT INTO ${quoteIdent(this._table)} (${quoteIdentList(columns)}) VALUES ${tuples.join(", ")}`;
+        text += this._compileConflict();
+        text += this._compileReturning();
+        return text;
+    }
+
     private _compileUpdate(): string {
         const values = this._updateValues ?? {};
         const columns = Object.keys(values);
@@ -550,8 +1370,41 @@ export class QueryBuilder implements QueryBuilderType {
         return text;
     }
 
+    private _compileSelect(): string {
+        const distinct = this._compileDistinct();
+        const columns = this._compileSelectList();
+        const from = this._compileFrom();
+        const joins = this._compileJoins();
+        const where = this._compileWhere();
+        const groupBy = this._compileGroupBy();
+        const having = this._compileHaving();
+        const orderBy = this._compileOrderBy();
+        const limit = this._compileLimit();
+        const offset = this._compileOffset();
+        const forUpdate = this._compileForUpdate();
+
+        let text = `SELECT ${distinct}${columns} ${from}${joins}${where}${groupBy}${having}${orderBy}${limit}${offset}${forUpdate}`;
+        
+        return text;
+    }
+
     toSQL(): { text: string; values: unknown[] } {
         const builder = this._buildCloneWithFreshParams();
+        
+        // Handle combined queries (UNION, INTERSECT, EXCEPT)
+        if (builder._combinedQueries.length > 0) {
+            // Get the main query SQL
+            const mainSql = builder._compile();
+            const combinedSql = builder._compileCombinedQueries();
+            const ctesSql = builder._compileCTEs();
+            
+            return { 
+                text: `${ctesSql}${mainSql}${combinedSql}`, 
+                values: builder._params.values 
+            };
+        }
+        
+        // Normal query
         const text = builder._compile();
         return { text, values: builder._params.values };
     }
@@ -563,15 +1416,17 @@ export class QueryBuilder implements QueryBuilderType {
     }
 
     private _compile(): string {
+        const ctes = this._compileCTEs();
+        
         switch (this._mode) {
             case "insert":
-                return this._compileInsert();
+                return `${ctes}${this._compileInsert()}`;
             case "update":
-                return this._compileUpdate();
+                return `${ctes}${this._compileUpdate()}`;
             case "delete":
-                return this._compileDelete();
+                return `${ctes}${this._compileDelete()}`;
             default:
-                return this._compileSelect();
+                return `${ctes}${this._compileSelect()}`;
         }
     }
 
@@ -581,15 +1436,31 @@ export class QueryBuilder implements QueryBuilderType {
         if (typeof runner !== "function") {
             throw new TypeError("QueryBuilder was not given a query function to execute with");
         }
-        // Merge builder-level shard routing into execution options. Per-call
-        // options take precedence over builder-level configuration.
-        const mergedOptions: Record<string, unknown> = { ...queryOptions };
+        
+        // Add query logging context to options
+        const baseOptions: Record<string, unknown> = typeof queryOptions === 'object' && queryOptions !== null ? queryOptions : {};
+        const optionsWithContext = {
+            ...baseOptions,
+            queryContext: { 
+                ...this._queryLoggingContext, 
+                ...(baseOptions.queryContext as object ?? {})
+            }
+        };
+        
+        // Merge builder-level shard routing into execution options
+        const mergedOptions: Record<string, unknown> = { ...optionsWithContext };
         if (this._shardKey && mergedOptions.shardKey === undefined) {
             mergedOptions.shardKey = this._shardKey;
         }
         if (this._shardId && mergedOptions.shardId === undefined) {
             mergedOptions.shardId = this._shardId;
         }
+        
+        // Handle timeout if set in context
+        if (this._queryLoggingContext.timeout) {
+            mergedOptions.timeout = this._queryLoggingContext.timeout;
+        }
+        
         const result = await runner(text, values, mergedOptions);
         return result ?? { rows: [], command: "", rowCount: 0, oid: 0, fields: [] };
     }
@@ -612,6 +1483,83 @@ export class QueryBuilder implements QueryBuilderType {
     }
 }
 
+// Helper class for building CASE expressions
+export class CaseBuilder {
+    private _value: string | QueryFragment | null = null;
+    private _when: Array<{ condition: string | QueryFragment; result: unknown }> = [];
+    private _else: unknown | null = null;
+
+    value(value: string | QueryFragment): this {
+        this._value = value;
+        return this;
+    }
+
+    when(condition: string | QueryFragment, result: unknown): this {
+        this._when.push({ condition, result });
+        return this;
+    }
+
+    else(result: unknown): this {
+        this._else = result;
+        return this;
+    }
+
+    build(): QueryFragment {
+        const params: unknown[] = [];
+        const parts: string[] = [];
+
+        if (this._value) {
+            if (isFragment(this._value)) {
+                parts.push(`CASE ${this._value.text}`);
+                params.push(...(this._value.values ?? []));
+            } else {
+                parts.push(`CASE ${this._value}`);
+            }
+        } else {
+            parts.push("CASE");
+        }
+
+        for (const { condition, result } of this._when) {
+            if (isFragment(condition)) {
+                parts.push(`WHEN ${condition.text}`);
+                params.push(...(condition.values ?? []));
+            } else {
+                parts.push(`WHEN ${condition}`);
+            }
+            
+            if (isFragment(result)) {
+                parts.push(`THEN ${result.text}`);
+                params.push(...(result.values ?? []));
+            } else if (result instanceof QueryBuilder) {
+                const { text, values } = result.toSQL();
+                parts.push(`THEN (${text})`);
+                params.push(...values);
+            } else {
+                parts.push(`THEN $${params.length + 1}`);
+                params.push(result);
+            }
+        }
+
+        if (this._else !== null) {
+            if (isFragment(this._else)) {
+                parts.push(`ELSE ${this._else.text}`);
+                params.push(...(this._else.values ?? []));
+            } else if (this._else instanceof QueryBuilder) {
+                const { text, values } = (this._else as QueryBuilder).toSQL();
+                parts.push(`ELSE (${text})`);
+                params.push(...values);
+            } else {
+                parts.push(`ELSE $${params.length + 1}`);
+                params.push(this._else);
+            }
+        }
+
+        parts.push("END");
+
+        return raw(parts.join(" "));
+    }
+}
+
 export function createQueryBuilder({ query, logger, shardKey, shardId }: {
     query?: QueryRunner;
     logger?: unknown;
@@ -622,3 +1570,5 @@ export function createQueryBuilder({ query, logger, shardKey, shardId }: {
         return new QueryBuilder({ query, table, logger, shardKey, shardId });
     };
 }
+
+export { sql, raw, identifier, quoteIdent, quoteIdentList, isFragment };

@@ -36,11 +36,24 @@ export function createCursor(pool: Pool, resolvePool?: PoolResolver): CursorApi 
         let released = false;
         let closed = false;
 
+        // Track cursor creation time for leak detection
+        const createdAt = Date.now();
+        const CURSOR_TIMEOUT = 300000; // 5 minutes
+        
+        // Set timeout to warn about long-running cursors
+        const cursorTimeout = setTimeout(() => {
+            console.warn(
+                `[database] Cursor held for more than 5 minutes. ` +
+                `This may indicate a leak. Stack: ${new Error().stack}`
+            );
+        }, CURSOR_TIMEOUT);
+
         const release = (error?: Error): void => {
             if (released) {
                 return;
             }
             released = true;
+            clearTimeout(cursorTimeout);
             if (error && isConnectionError(error)) {
                 client.release?.(error);
             } else {
@@ -56,6 +69,7 @@ export function createCursor(pool: Pool, resolvePool?: PoolResolver): CursorApi 
                 }
 
                 closed = true;
+                clearTimeout(cursorTimeout);
 
                 instance.close((closeError) => {
                     release(error ?? (closeError ?? undefined));
@@ -72,7 +86,12 @@ export function createCursor(pool: Pool, resolvePool?: PoolResolver): CursorApi 
 
         async function read(count = 100): Promise<QueryResultRow[]> {
             return new Promise((resolve, reject) => {
+                const readTimeout = setTimeout(() => {
+                    reject(new Error('Cursor read timed out'));
+                }, 30000); // 30 seconds timeout
+                
                 instance.read(count, (error, rows) => {
+                    clearTimeout(readTimeout);
                     if (error) {
                         close(error).catch(() => {});
                         reject(error);
@@ -98,6 +117,7 @@ export function createCursor(pool: Pool, resolvePool?: PoolResolver): CursorApi 
                     }
                 }
             } finally {
+                clearTimeout(cursorTimeout);
                 await close().catch(() => {});
             }
         }

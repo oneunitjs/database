@@ -8,6 +8,7 @@
 
 - [Project Layout](#project-layout)
 - [Design Principles](#design-principles)
+- [When to Use Each Layer](#when-to-use-each-layer)
 - [Composition Model](#composition-model)
 - [Module Map](#module-map)
 - [Core Client Layer](#core-client-layer)
@@ -158,6 +159,742 @@ Retries are **off by default**. When enabled, only genuinely transient PostgreSQ
 ### 6. Atomic Write Fencing
 
 When an online resharding migration is active, writes to shards being migrated are protected by a shared advisory lock (`pg_advisory_xact_lock_shared`) acquired before checking the durable write gate table (`resharding_write_gate`). Cutover acquires an exclusive lock, which blocks until all shared-lock holders finish — eliminating TOCTOU races.
+
+---
+
+## Production Reliability Features
+
+The following features have been implemented to ensure production-grade reliability:
+
+### Connection Validation
+
+**Location:** `src/client/pool.ts`
+
+**Purpose:** Prevents errors from stale or broken connections that have been returned to the pool.
+
+**Implementation:**
+- Connections are wrapped with a Proxy that validates them on first query
+- Validation executes `SELECT 1` to confirm the connection is alive
+- If validation fails, the connection is released and an error is thrown
+- This is **opt-in** via `validateConnections: true` to avoid breaking existing code
+
+**Use Case:**
+```javascript
+const db = createDatabase({
+    validateConnections: true, // Enable connection validation
+});
+```
+
+**Trade-offs:**
+- Adds one extra query per connection on first use
+- Only validates when `query()` is called, not on `connect()`
+- Prevents `ECONNRESET` and similar errors from stale connections
+
+---
+
+### Connection Leak Detection
+
+**Location:** `src/client/pool.ts`, `src/client/client.ts`, `src/client/cursor.ts`
+
+**Purpose:** Detects and warns about connections that are checked out but never released.
+
+**Implementation:**
+1. **Pool-level tracking:** All connections are tracked in a Set
+2. **5-minute timeout:** If a connection is still in the Set after 5 minutes, a warning is logged with stack trace
+3. **Manual client tracking:** Clients acquired via `getClient()` are tracked separately with the same timeout
+4. **Cursor tracking:** Cursors have their own 5-minute timeout for leak detection
+
+**Warning Output:**
+```
+[database] Connection leak detected
+{
+  message: 'Connection not released within 5 minutes',
+  stack: 'Error: at file.js:line:column...',
+  totalConnections: 10,
+  idleConnections: 5
+}
+```
+
+**API:**
+```javascript
+// Check active manual clients (for monitoring)
+const activeCount = db.getActiveManualClientCount();
+```
+
+---
+
+### Enhanced Pool Health Metrics
+
+**Location:** `src/client/check.ts`
+
+**Purpose:** Provides better visibility into connection pool status for monitoring and debugging.
+
+**Extended Statistics:**
+- `total`: Total number of connections in the pool
+- `idle`: Number of idle connections
+- `waiting`: Number of clients waiting for a connection
+- `pendingAcquire`: Number of pending connection acquisitions (internal pg.Pool metric)
+- `max`: Maximum pool size
+
+**Use Case:**
+```javascript
+const health = await db.check();
+// {
+//   status: 'up',
+//   latency: { value: 5, unit: 'ms' },
+//   pool: {
+//     total: 10,
+//     idle: 7,
+//     waiting: 0,
+//     pendingAcquire: 0,
+//     max: 20
+//   }
+// }
+```
+
+---
+
+### Improved Retry Logic
+
+**Location:** `src/client/retry.ts`
+
+**Purpose:** Prevents retry storms when the pool is exhausted or connections are failing.
+
+**Implementation:**
+- Added `isRetryableError()` function that excludes pool-related errors
+- Errors that are **NOT** retried:
+  - `POOL_EXHAUSTED`: Pool has no available connections
+  - `ECONNREFUSED` with 'pool' in message: Pool connection refused
+  - `ECONNRESET`: Connection was reset
+  - `ETIMEDOUT` with 'pool' in message: Connection timeout during pool acquisition
+
+**Rationale:** These errors typically indicate:
+1. The pool is at capacity (retrying will fail again)
+2. The connection is fundamentally broken (retrying won't help)
+3. A configuration issue (retrying won't resolve it)
+
+**Use Case:**
+```javascript
+// Default: uses isRetryableError (excludes pool errors)
+await db.query(sql, values, { retry: true });
+
+// Custom: override with your own predicate
+await db.query(sql, values, {
+    retry: {
+        retries: 3,
+        shouldRetry: (error) => isTransientError(error) && !isPoolError(error),
+    },
+});
+```
+
+---
+
+### Cursor Resource Management
+
+**Location:** `src/client/cursor.ts`
+
+**Purpose:** Prevents PostgreSQL server resource leaks from long-running or abandoned cursors.
+
+**Implementation:**
+1. **5-minute timeout:** Warns if cursor is held for more than 5 minutes
+2. **30-second read timeout:** Individual read operations timeout after 30 seconds
+3. **Automatic cleanup:** Cursor is closed when:
+   - Iteration completes (for/await loop)
+   - Error occurs during reading
+   - `close()` is explicitly called
+4. **Connection release:** Client connection is released when cursor closes
+
+**Warning Output:**
+```
+[database] Cursor held for more than 5 minutes. This may indicate a leak.
+Stack: Error: at file.js:line:column...
+```
+
+**Best Practices:**
+```javascript
+// Good: Always use try/finally or for/await
+for await (const row of cursor) {
+    process(row);
+}
+// Connection and cursor automatically cleaned up
+
+// Good: Explicit cleanup
+try {
+    const cursor = await db.cursor(query);
+    // process cursor
+} finally {
+    await cursor.close();
+}
+
+// Bad: Missing cleanup (will warn after 5 minutes)
+const cursor = await db.cursor(query);
+// Forgot to iterate or close
+```
+
+---
+
+## When to Use Each Layer
+
+This section provides guidance on when to enable and use each architectural layer based on your application's requirements, scale, and complexity.
+
+### Decision Tree
+
+```
+Start
+  │
+  ├─ Single database? ── Yes ──► Use: client, query, model, schema, migrate
+  │                         (Core features for most applications)
+  │
+  ├─ Need read scaling? ── Yes ──► Use: + replication
+  │                         (Add read replicas for query load distribution)
+  │
+  ├─ Data exceeds single DB capacity? ── Yes ──► Use: + sharding
+  │                                           (Partition data across multiple databases)
+  │
+  ├─ Need to add/remove shards without downtime? ── Yes ──► Use: + resharding
+  │                                                           (Online data migration)
+  │
+  ├─ Need cross-shard transactions? ── Yes ──► Use: + distributed-tx
+  │                                                 (Two-phase commit for atomicity)
+  │
+  └─ Need automatic failover? ── Yes ──► Use: + failover
+                                        (High availability with primary/replica switching)
+```
+
+### Layer-by-Layer Usage Guide
+
+#### Core Client Layer (`client/`)
+
+**When to Use: ALWAYS**
+
+The core client layer is the foundation of `@oneunit/database` and should be used by every application. It provides:
+
+- Connection pooling via `pg.Pool`
+- Query execution with parameterized SQL
+- Transaction management (BEGIN/COMMIT/ROLLBACK)
+- Savepoints for nested transactions
+- Health checks and graceful shutdown
+- Streaming and cursor support (with peer dependencies)
+- Retry logic for transient errors
+- Hooks and metrics for observability
+
+**Architecture Pattern:** Single database, single connection pool
+
+**Use Case Examples:**
+- Small to medium applications
+- Microservices with dedicated databases
+- Serverless functions
+- CLI tools and scripts
+
+**Configuration Complexity:** Low
+- Typically only requires `connectionString` or environment variables
+- Optional: pool size, timeouts, SSL configuration
+
+---
+
+#### Query Layer (`query/`)
+
+**When to Use: ALWAYS (Recommended)**
+
+The query layer provides safe SQL construction and should be used alongside the core client layer:
+
+- **`sql`` tagged template**: Safe SQL string construction with parameterized values
+- **`QueryBuilder`**: Fluent API for building SELECT, INSERT, UPDATE, DELETE queries
+
+**Architecture Pattern:** Works with any layer (client, sharding, replication)
+
+**Use Case Examples:**
+- All applications that need to construct dynamic queries
+- Applications concerned with SQL injection prevention
+- Type-safe query construction
+
+**Configuration Complexity:** Low
+- No configuration required; purely API-based
+
+---
+
+#### Model Layer (`model/`)
+
+**When to Use: When you have CRUD-heavy operations**
+
+The model layer provides a table-level CRUD abstraction that reduces boilerplate:
+
+- `find()`, `findOne()`, `findById()` - Query operations
+- `insert()`, `insertMany()` - Create operations
+- `update()`, `updateById()` - Update operations
+- `delete()`, `deleteById()`, `remove()` - Delete operations
+- `count()`, `exists()` - Aggregation operations
+
+**Architecture Pattern:** Works with single DB or sharded configurations
+
+**Use Case Examples:**
+- Applications with many tables following similar patterns
+- Rapid development where boilerplate reduction is valuable
+- Internal services with well-defined data models
+
+**When NOT to Use:**
+- Complex queries that don't fit the CRUD pattern
+- Applications needing maximum query flexibility
+- Bulk operations (use batch layer instead)
+
+**Configuration Complexity:** Low
+- Define table name and optional ID column
+
+---
+
+#### Schema & Migration Layer (`schema/`, `migrate/`)
+
+**When to Use: When you need database schema management**
+
+The schema and migration layers provide DDL (Data Definition Language) operations and versioned migrations:
+
+- **Schema Manager**: CREATE/ALTER/DROP tables and indexes
+- **Migrator**: Versioned migration runner with advisory locks
+- **Column Helpers**: Pre-defined column types (id, uuid, timestamp)
+
+**Architecture Pattern:** Works with any database topology
+
+**Use Case Examples:**
+- Applications that need to evolve their schema over time
+- Development environments where schema changes are frequent
+- CI/CD pipelines that deploy schema changes
+- Multi-environment deployments (dev, staging, production)
+
+**When NOT to Use:**
+- Applications using external migration tools (Flyway, Liquibase, etc.)
+- Schema managed by ORM (though can be used alongside)
+
+**Configuration Complexity:** Medium
+- Requires defining migrations as SQL strings or JavaScript functions
+- Needs migration table in database
+
+---
+
+#### Batch Layer (`batch/`)
+
+**When to Use: When inserting large datasets**
+
+The batch layer provides efficient multi-row inserts:
+
+- Chunked inserts that respect PostgreSQL's parameter limit (65,535)
+- Configurable chunk sizes
+- ON CONFLICT support for upserts
+- RETURNING clause support
+
+**Architecture Pattern:** Works with any database topology
+
+**Use Case Examples:**
+- Bulk data loading from CSV or API responses
+- Event logging systems
+- Data warehouse loading
+- Any operation inserting hundreds or thousands of rows
+
+**When NOT to Use:**
+- Single-row or small inserts (use client.query directly)
+- Updates or deletes (use QueryBuilder or raw SQL)
+
+**Configuration Complexity:** Low
+- Mainly chunkSize configuration
+
+---
+
+#### Replication Layer (`replication/`)
+
+**When to Use: When you need read scaling**
+
+The replication layer enables routing read queries to PostgreSQL read replicas:
+
+- Primary/replica routing based on `readPreference`
+- Three modes: `"primary"`, `"replica-preferred"`, `"replica-only"`
+- Lag-aware health checks using `pg_last_xact_replay_timestamp()`
+- Per-replica health monitoring
+- Runtime add/remove of replicas
+
+**Architecture Pattern:** Single primary with one or more read replicas
+
+**Use Case Examples:**
+- Read-heavy applications (analytics, reporting, dashboards)
+- Applications where read load exceeds single DB capacity
+- Geographic distribution of read traffic
+- Disaster recovery scenarios (read from replica during primary outage)
+- Caching layer replacement (use PostgreSQL replicas instead)
+
+**When NOT to Use:**
+- Write-heavy applications without read load
+- Applications that cannot tolerate read staleness
+- Without proper replica infrastructure (replicas must be provisioned separately)
+
+**Configuration Complexity:** Medium
+- Requires provisioning PostgreSQL replicas (streaming replication)
+- Network configuration for replica connectivity
+- Lag threshold tuning
+
+**Infrastructure Requirements:**
+- PostgreSQL primary with `wal_level = replica` or higher
+- One or more PostgreSQL replicas with streaming replication configured
+- Network connectivity between application and all replicas
+
+---
+
+#### Sharding Layer (`sharding/`)
+
+**When to Use: When you need to partition data across multiple databases**
+
+The sharding layer enables horizontal scaling by distributing data across multiple PostgreSQL databases (shards):
+
+- Nine routing strategies for different data access patterns
+- Per-shard connection pools
+- Shard health monitoring
+- Distributed drain coordination for safe shard removal
+- Write fencing to prevent writes during resharding
+- Add/remove shards at runtime
+
+**Architecture Pattern:** Multiple independent PostgreSQL databases
+
+**Use Case Examples:**
+- Multi-tenant SaaS applications (tenant isolation)
+- High-volume applications exceeding single DB write capacity
+- Data residency requirements (geographic partitioning)
+- Time-series data with natural temporal partitioning
+- Applications with data that naturally partitions (by user, region, customer, etc.)
+
+**When NOT to Use:**
+- Applications that fit within a single database
+- Applications requiring frequent cross-shard queries (joins, aggregations)
+- Without careful shard key selection (avoid hot spots)
+- When network latency between application and shards is high
+
+**Configuration Complexity:** High
+- Requires designing shard key strategy
+- Application logic must be shard-aware
+- Cross-shard operations need special handling
+
+**Infrastructure Requirements:**
+- Multiple PostgreSQL instances (one per shard)
+- Network connectivity to all shards
+- Coordination database (optional, for distributed state)
+- Monitoring for per-shard health
+
+**Strategy Selection Guide:**
+
+| Strategy | Best For | Key Distribution | Remapping on Change | Complexity |
+| :--- | :--- | :--- | :--- | :--- |
+| `hash` | General purpose, even distribution | Hash modulo N | Most keys remap | Low |
+| `consistent-hash` | Cache-like, minimal remapping | Hash ring with virtual nodes | ~1/(N+1) keys remap | Medium |
+| `rendezvous` | General purpose, deterministic | Highest random weight | Most keys remap | Low |
+| `range` | Ordered data (time, IDs) | Explicit numeric/string ranges | Only boundary keys remap | Medium |
+| `directory` | Known key→shard mapping | Explicit lookup table | Only affected keys remap | Medium |
+| `tenant` | Multi-tenant SaaS | Tenant ID → shard mapping | Only affected tenants remap | Low |
+| `composite` | Multi-component keys | Serialized composite key | Depends on component changes | Medium |
+| `geographic` | Data residency | Region → eligible shards | Only affected regions remap | Low |
+| `weighted` | Uneven capacity | Weighted random-walk | Most keys remap | Low |
+
+---
+
+#### Online Resharding Layer (`resharding/`)
+
+**When to Use: When you need to change shard topology without downtime**
+
+The online resharding layer provides durable, crash-recoverable data migration when shard membership changes:
+
+- Plan migration (define source, destination, tables)
+- Keyset-paginated batch copy (bounded, resumable)
+- Transactional change capture (no data loss during migration)
+- Coordinated cutover (atomic routing version publish)
+- Write fencing (prevent writes to migrating shards)
+- Crash recovery (all operations durable and idempotent)
+
+**Architecture Pattern:** Existing sharded deployment + coordination database
+
+**Use Case Examples:**
+- Adding new shards to handle increased data volume
+- Removing shards to reduce costs
+- Rebalancing data across shards
+- Changing sharding strategy
+- Migrating to new database instances
+- Zero-downtime shard maintenance
+
+**When NOT to Use:**
+- Simple applications without sharding
+- Applications that can tolerate downtime for resharding
+- When data volume is small enough for pg_dump/pg_restore
+- For one-time migrations (manual process may be simpler)
+
+**Configuration Complexity:** Very High
+- Requires understanding of distributed systems concepts
+- Coordination database setup
+- Migration descriptor configuration
+- Monitoring and troubleshooting complex workflows
+
+**Infrastructure Requirements:**
+- Existing sharded deployment
+- Coordination PostgreSQL database
+- Sufficient resources for parallel copy operations
+- Monitoring for migration progress and health
+
+**Lifecycle:**
+```
+planned → copying → catching_up → validating → ready_for_cutover → cutting_over → completed → finalized
+```
+
+Each state is durable and recoverable. Operations are idempotent and can be resumed after crashes.
+
+---
+
+#### Distributed Transaction Layer (`distributed-tx/`)
+
+**When to Use: When you need atomic operations across multiple shards**
+
+The distributed transaction layer implements two-phase commit (2PC) for cross-shard atomicity:
+
+- PREPARE TRANSACTION on all participants
+- COMMIT PREPARED on all participants (or ROLLBACK PREPARED on failure)
+- Participant registration and status tracking
+- Crash recovery via durable coordination state
+- Automatic abort on any failure
+
+**Architecture Pattern:** Multi-shard deployment with 2PC support
+
+**Use Case Examples:**
+- Financial transactions across user accounts on different shards
+- Inventory management across multiple warehouses (shards)
+- Data consistency across partitioned datasets
+- Any operation requiring atomicity across shard boundaries
+
+**When NOT to Use:**
+- Applications without sharding (use regular transactions instead)
+- Operations that can tolerate eventual consistency
+- High-throughput systems (2PC has performance overhead)
+- Without proper PostgreSQL configuration (`max_prepared_transactions > 0`)
+
+**Configuration Complexity:** Very High
+- Requires understanding of distributed transactions
+- Application logic must handle 2PC semantics
+- Error handling for partial failures
+- Coordination database for state tracking
+
+**Infrastructure Requirements:**
+- PostgreSQL with `max_prepared_transactions > 0` on all shards
+- Coordination database for transaction state
+- Network connectivity between all shards and coordinator
+- Monitoring for prepared transaction state
+
+**Performance Considerations:**
+- 2PC adds latency (two round-trips instead of one)
+- Prepared transactions hold locks until committed
+- Not suitable for high-frequency cross-shard operations
+- Consider eventual consistency alternatives where possible
+
+---
+
+#### Failover Layer (`failover/`)
+
+**When to Use: When you need high availability with automatic primary/replica switching**
+
+The failover layer provides high-availability capabilities:
+
+- Primary/replica role management
+- Automatic failover when primary becomes unavailable
+- State machine for drain-and-wait semantics (ACTIVE → DRAINING → DRAINED → REMOVED)
+- HA provider integration for external failover detection
+
+**Architecture Pattern:** Replicated deployment with automatic failover
+
+**Use Case Examples:**
+- Mission-critical applications requiring 99.99%+ uptime
+- Applications where manual failover is unacceptable
+- Geographic redundancy with automatic traffic rerouting
+- Disaster recovery scenarios
+- Applications using managed database services with failover support
+
+**When NOT to Use:**
+- Applications that can tolerate manual failover
+- Single database deployments
+- Development/testing environments
+- Without proper monitoring and alerting
+
+**Configuration Complexity:** High
+- Requires understanding of HA/DR concepts
+- Integration with HA provider or external system
+- Configuration of failover detection and timeouts
+
+**Infrastructure Requirements:**
+- PostgreSQL with automatic failover configured (Patroni, pg_autofailover, etc.)
+- Or managed database service with failover support (RDS, Cloud SQL, etc.)
+- Network configuration for failover detection
+- Monitoring for primary/replica health
+
+---
+
+### Layer Combination Patterns
+
+#### Pattern 1: Simple Single Database
+
+**Layers:** client, query, model, schema, migrate
+
+**Description:** The most common pattern for applications that fit within a single database.
+
+**Infrastructure:**
+- Single PostgreSQL instance
+- Optional: Connection pooler (PgBouncer)
+
+**Code Example:**
+```javascript
+const db = createDatabase({
+    connectionString: process.env.DATABASE_URL,
+    max: 20,
+});
+```
+
+**When to Use:**
+- Small to medium applications
+- Microservices with dedicated databases
+- Development and testing environments
+
+---
+
+#### Pattern 2: Read-Optimized Single Database
+
+**Layers:** client, query, model, schema, migrate, replication
+
+**Description:** Single primary database with read replicas for scaling read operations.
+
+**Infrastructure:**
+- Primary PostgreSQL instance
+- One or more read replicas (streaming replication)
+- Optional: Connection pooler per instance
+
+**Code Example:**
+```javascript
+const db = createDatabase({
+    replication: {
+        enabled: true,
+        mode: "replica-preferred",
+        primary: { id: "primary", connection: { connectionString: "..." } },
+        replicas: [
+            { id: "replica-1", connection: { connectionString: "..." } },
+            { id: "replica-2", connection: { connectionString: "..." } },
+        ],
+    },
+});
+```
+
+**When to Use:**
+- Read-heavy applications (10:1 read/write ratio or higher)
+- Analytics and reporting workloads
+- Geographic distribution of read traffic
+
+---
+
+#### Pattern 3: Sharded Application
+
+**Layers:** client, query, model, schema, migrate, sharding
+
+**Description:** Data partitioned across multiple shards based on a shard key.
+
+**Infrastructure:**
+- Multiple PostgreSQL instances (one per shard)
+- Optional: Coordination database for distributed state
+- Optional: Connection pooler per shard
+
+**Code Example:**
+```javascript
+const db = createDatabase({
+    sharding: {
+        enabled: true,
+        strategy: "tenant",
+        defaultShardId: "shard-0",
+        shards: [
+            { id: "shard-0", connection: { connectionString: "..." } },
+            { id: "shard-1", connection: { connectionString: "..." } },
+        ],
+    },
+});
+```
+
+**When to Use:**
+- Applications that have outgrown a single database
+- Multi-tenant SaaS applications
+- Data that naturally partitions
+
+---
+
+#### Pattern 4: Sharded + Replicated Application
+
+**Layers:** client, query, model, schema, migrate, sharding, replication
+
+**Description:** Each shard has its own primary and replicas for both write scaling and read scaling.
+
+**Infrastructure:**
+- Multiple shards, each with primary and replicas
+- Optional: Coordination database
+- Optional: Connection pooler per shard/instance
+
+**Code Example:**
+```javascript
+const db = createDatabase({
+    sharding: {
+        enabled: true,
+        strategy: "hash",
+        shards: [
+            {
+                id: "shard-0",
+                connection: { connectionString: "..." },
+                replication: {
+                    enabled: true,
+                    mode: "replica-preferred",
+                    replicas: [
+                        { id: "shard-0-replica-1", connection: { connectionString: "..." } },
+                    ],
+                },
+            },
+            // ... more shards
+        ],
+    },
+});
+```
+
+**When to Use:**
+- Large-scale applications with both high write and read loads
+- Applications requiring both sharding and read scaling
+- Geographic distribution with sharding
+
+---
+
+#### Pattern 5: Enterprise-Grade Deployment
+
+**Layers:** ALL (client, query, model, schema, migrate, sharding, replication, resharding, distributed-tx, failover)
+
+**Description:** Full-featured deployment with all capabilities for maximum scalability, availability, and flexibility.
+
+**Infrastructure:**
+- Multiple shards, each with primary and replicas
+- Coordination database
+- HA/DR configuration
+- Monitoring and alerting
+- Load balancers
+
+**Code Example:**
+```javascript
+const db = createDatabase({
+    sharding: {
+        enabled: true,
+        strategy: "hash",
+        coordination: { connectionString: "..." },
+        shards: [/* shards with replication */],
+    },
+    failover: {
+        enabled: true,
+        provider: "custom",
+    },
+});
+```
+
+**When to Use:**
+- Enterprise applications with strict SLA requirements
+- Mission-critical systems requiring 99.99%+ uptime
+- Applications with complex data consistency requirements
+- Systems that need zero-downtime operations
 
 ---
 

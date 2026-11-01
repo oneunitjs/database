@@ -14,11 +14,46 @@ function poolStats(pool: Pool | undefined): { total: number; idle: number; waiti
     };
 }
 
+function extendedPoolStats(pool: Pool | undefined): { 
+    total: number; 
+    idle: number; 
+    waiting: number;
+    pendingAcquire: number;
+    max: number;
+} | undefined {
+    if (typeof pool?.totalCount !== "number") {
+        return undefined;
+    }
+
+    // pendingAcquireCount is an internal property, access via type assertion
+    const pgPool = pool as unknown as { 
+        totalCount: number; 
+        idleCount: number; 
+        waitingCount: number;
+        pendingAcquireCount: number;
+        options: { max: number };
+    };
+
+    return {
+        total: pool.totalCount,
+        idle: pool.idleCount,
+        waiting: pool.waitingCount,
+        pendingAcquire: pgPool.pendingAcquireCount ?? 0,
+        max: pool.options?.max ?? pool.totalCount,
+    };
+}
+
 export function createCheck(pool: Pool): CheckApi {
     async function check(options: { timeout?: number } = {}): Promise<{
         status: "up" | "down";
         latency: { value: number; unit: "ms" };
-        pool?: { total: number; idle: number; waiting: number };
+        pool?: { 
+            total: number; 
+            idle: number; 
+            waiting: number;
+            pendingAcquire: number;
+            max: number;
+        };
         error?: string;
         code?: string;
     }> {
@@ -33,7 +68,7 @@ export function createCheck(pool: Pool): CheckApi {
                     value: Math.round(performance.now() - start),
                     unit: "ms",
                 },
-                pool: poolStats(pool),
+                pool: extendedPoolStats(pool),
             };
         } catch (error) {
             return {
@@ -44,7 +79,7 @@ export function createCheck(pool: Pool): CheckApi {
                 },
                 error: error instanceof Error ? error.message : String(error),
                 code: (error as { code?: string }).code,
-                pool: poolStats(pool),
+                pool: extendedPoolStats(pool),
             };
         }
     }
@@ -58,7 +93,13 @@ export function createCheck(pool: Pool): CheckApi {
         healthy: boolean;
         checkedAt: string;
         latency: { value: number; unit: "ms" };
-        pool?: { total: number; idle: number; waiting: number };
+        pool?: { 
+            total: number; 
+            idle: number; 
+            waiting: number;
+            pendingAcquire: number;
+            max: number;
+        };
         error: string | null;
         errorCode: string | null;
     }> {

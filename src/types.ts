@@ -893,9 +893,56 @@ export interface InsertManyOptions {
 
 export interface BatchApi {
     insertMany(table: string, rows: Record<string, unknown>[], options?: InsertManyOptions): Promise<unknown>;
+    selectMany(
+        builderOrSql: any, // QueryBuilder | { text: string; values: unknown[] } | string
+        options?: {
+            chunkSize?: number;
+            queryOptions?: QueryOptions;
+            shardKey?: string;
+            shardId?: string;
+            client?: any; // PoolClient
+            onChunk?: (rows: unknown[]) => Promise<void> | void;
+        }
+    ): Promise<unknown[]>;
+    updateMany(
+        table: string,
+        values: Record<string, unknown>,
+        whereConditions: { column: string; operator: string; values: unknown[] }[],
+        options?: {
+            chunkSize?: number;
+            returning?: string[];
+            queryOptions?: QueryOptions;
+            shardKey?: string;
+            shardId?: string;
+            client?: any; // PoolClient
+        }
+    ): Promise<unknown[]>;
+    deleteMany(
+        table: string,
+        whereConditions: { column: string; operator: string; values: unknown[] }[],
+        options?: {
+            chunkSize?: number;
+            returning?: string[];
+            queryOptions?: QueryOptions;
+            shardKey?: string;
+            shardId?: string;
+            client?: any; // PoolClient
+        }
+    ): Promise<unknown[]>;
+    executeBatch(
+        builders: any[], // QueryBuilder[]
+        options?: {
+            chunkSize?: number;
+            transaction?: boolean;
+            queryOptions?: QueryOptions;
+            shardKey?: string;
+            shardId?: string;
+        }
+    ): Promise<QueryResult[]>;
 }
 
 export interface QueryBuilder {
+    // Core CRUD
     select(...columns: Array<string | string[] | SqlFragment>): QueryBuilder;
     distinct(value?: boolean): QueryBuilder;
     insert(values: Record<string, unknown> | Record<string, unknown>[]): QueryBuilder;
@@ -903,38 +950,99 @@ export interface QueryBuilder {
     update(values: Record<string, unknown>): QueryBuilder;
     delete(): QueryBuilder;
     returning(...columns: Array<string | string[]>): QueryBuilder;
+    
+    // WHERE conditions
     where(column: string | Record<string, unknown> | SqlFragment, operator?: unknown, value?: unknown): QueryBuilder;
     orWhere(column: string, operator?: unknown, value?: unknown): QueryBuilder;
     whereNull(column: string): QueryBuilder;
     whereNotNull(column: string): QueryBuilder;
     whereIn(column: string, values: unknown[]): QueryBuilder;
     whereRaw(fragment: SqlFragment): QueryBuilder;
-    join(table: string, on: string | SqlFragment): QueryBuilder;
-    leftJoin(table: string, on: string | SqlFragment): QueryBuilder;
+    
+    // JSON operators
+    whereJson(column: string, operator: string, value: unknown): QueryBuilder;
+    whereJsonContains(column: string, value: unknown): QueryBuilder;
+    whereJsonContained(column: string, value: unknown): QueryBuilder;
+    
+    // Subqueries
+    from(subquery: QueryBuilder | QueryFragment | string, alias?: string): QueryBuilder;
+    selectSubquery(subquery: QueryBuilder | QueryFragment, alias: string): QueryBuilder;
+    whereExists(subquery: QueryBuilder | QueryFragment): QueryBuilder;
+    whereNotExists(subquery: QueryBuilder | QueryFragment): QueryBuilder;
+    whereInSubquery(column: string, subquery: QueryBuilder | QueryFragment): QueryBuilder;
+    whereNotInSubquery(column: string, subquery: QueryBuilder | QueryFragment): QueryBuilder;
+    
+    // CTEs (WITH clauses)
+    with(name: string, query: QueryBuilder | QueryFragment | string, columns?: string[], materialized?: boolean): QueryBuilder;
+    withRecursive(name: string, query: QueryBuilder | QueryFragment | string, columns?: string[]): QueryBuilder;
+    
+    // Window functions
+    window(name: string, definition: { partitionBy?: string[]; orderBy?: Array<{ column: string; direction?: string }>; frame?: { type?: "ROWS" | "RANGE"; start?: string | number; end?: string | number } }): QueryBuilder;
+    
+    // Complex joins
+    join(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+    innerJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+    leftJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+    rightJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+    fullJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+    fullOuterJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+    leftOuterJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+    rightOuterJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+    crossJoin(table: string | QueryBuilder, alias?: string): QueryBuilder;
+    
+    // Nested WHERE groups
+    whereGroup(callback: (builder: QueryBuilder) => QueryBuilder): QueryBuilder;
+    orWhereGroup(callback: (builder: QueryBuilder) => QueryBuilder): QueryBuilder;
+    
+    // Query combination
+    union(query: QueryBuilder): QueryBuilder;
+    unionAll(query: QueryBuilder): QueryBuilder;
+    intersect(query: QueryBuilder): QueryBuilder;
+    intersectAll(query: QueryBuilder): QueryBuilder;
+    except(query: QueryBuilder): QueryBuilder;
+    exceptAll(query: QueryBuilder): QueryBuilder;
+    
+    // CASE expressions
+    selectCase(alias: string, callback: (builder: import("./query/builder.js").CaseBuilder) => import("./query/builder.js").CaseBuilder): QueryBuilder;
+    
+    // DISTINCT ON
+    distinctOn(columns: string[]): QueryBuilder;
+    
+    // Row locking
+    forUpdate(): QueryBuilder;
+    forNoKeyUpdate(): QueryBuilder;
+    skipLocked(): QueryBuilder;
+    
+    // Grouping
     groupBy(...columns: Array<string | string[]>): QueryBuilder;
     having(column: string, operator: string, value?: unknown): QueryBuilder;
-    orderBy(column: string, direction?: string): QueryBuilder;
+    
+    // Ordering
+    orderBy(column: string | SqlFragment, direction?: string): QueryBuilder;
+    
+    // Limiting
     limit(value: number): QueryBuilder;
     offset(value: number): QueryBuilder;
     onConflict(options: InsertManyOptions["onConflict"]): QueryBuilder;
+    
+    // Query logging and timeout
+    withQueryContext(context: Record<string, unknown>): QueryBuilder;
+    getQueryContext(): Record<string, unknown>;
+    timeout(ms: number): QueryBuilder;
+    
+    // Sharding
+    withShard(shardKey: string): QueryBuilder;
+    withShardId(shardId: string): QueryBuilder;
+    
+    // Execution
     toSQL(): { text: string; values: unknown[] };
     execute(options?: QueryOptions): Promise<QueryResult>;
     first(options?: QueryOptions): Promise<QueryResultRow | null>;
-    /**
-     * Pin this builder to a specific shard key. Replaces any previously set
-     * shard key or shard id. The shard key is merged into execution options at
-     * `.execute()` time and routed through the unified executor.
-     */
-    withShard(shardKey: string): QueryBuilder;
-    /**
-     * Pin this builder to a specific shard id. Replaces any previously set
-     * shard key or shard id.
-     */
-    withShardId(shardId: string): QueryBuilder;
     then<TResult1 = QueryResult, TResult2 = never>(
         onfulfilled?: ((value: QueryResult) => TResult1 | PromiseLike<TResult1>) | null,
         onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
     ): Promise<TResult1 | TResult2>;
+    catch<TResult>(onRejected?: (reason: unknown) => TResult | PromiseLike<TResult>): Promise<TResult | QueryResult>;
 }
 
 export interface ModelFindOptions extends QueryOptions {
@@ -1067,6 +1175,52 @@ export interface CursorApi {
 
 export interface BatchApi {
     insertMany(table: string, rows: Record<string, unknown>[], options?: InsertManyOptions): Promise<unknown>;
+    selectMany(
+        builderOrSql: any,
+        options?: {
+            chunkSize?: number;
+            queryOptions?: QueryOptions;
+            shardKey?: string;
+            shardId?: string;
+            client?: any;
+            onChunk?: (rows: unknown[]) => Promise<void> | void;
+        }
+    ): Promise<unknown[]>;
+    updateMany(
+        table: string,
+        values: Record<string, unknown>,
+        whereConditions: { column: string; operator: string; values: unknown[] }[],
+        options?: {
+            chunkSize?: number;
+            returning?: string[];
+            queryOptions?: QueryOptions;
+            shardKey?: string;
+            shardId?: string;
+            client?: any;
+        }
+    ): Promise<unknown[]>;
+    deleteMany(
+        table: string,
+        whereConditions: { column: string; operator: string; values: unknown[] }[],
+        options?: {
+            chunkSize?: number;
+            returning?: string[];
+            queryOptions?: QueryOptions;
+            shardKey?: string;
+            shardId?: string;
+            client?: any;
+        }
+    ): Promise<unknown[]>;
+    executeBatch(
+        builders: any[],
+        options?: {
+            chunkSize?: number;
+            transaction?: boolean;
+            queryOptions?: QueryOptions;
+            shardKey?: string;
+            shardId?: string;
+        }
+    ): Promise<QueryResult[]>;
 }
 
 export interface ClientApi {
@@ -1077,6 +1231,7 @@ export interface ClientApi {
     prepare(name: string, text: string): PreparedStatement;
     prepared(name: string, text: string, values?: unknown[], options?: QueryOptions): Promise<QueryResult>;
     hooks: QueryHooks;
+    getActiveManualClientCount(): number;
 }
 
 export interface QueryContext {
@@ -1111,6 +1266,7 @@ export interface QueryHooks {
     onQueryError(context: QueryContext, error: DatabaseError): void;
     recordRetry(info: RetryInfo): void;
     config: InstrumentationOptions;
+    logger?: unknown;
 }
 
 export interface HooksConfig {

@@ -170,6 +170,7 @@ export function createHooks({
         onQueryError,
         recordRetry,
         config,
+        logger,
     };
 }
 

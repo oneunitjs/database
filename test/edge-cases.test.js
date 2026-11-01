@@ -774,6 +774,8 @@ describe("check/health edge cases", () => {
             totalCount: 3,
             idleCount: 2,
             waitingCount: 0,
+            pendingAcquireCount: 0,
+            options: { max: 10 },
             async query() {
                 return {};
             },
@@ -781,7 +783,7 @@ describe("check/health edge cases", () => {
         const { check } = createCheck(pool);
         const result = await check();
         expect(result.status).toBe("up");
-        expect(result.pool).toEqual({ total: 3, idle: 2, waiting: 0 });
+        expect(result.pool).toEqual({ total: 3, idle: 2, waiting: 0, pendingAcquire: 0, max: 10 });
     });
 
     it("latency is recorded on success", async () => {

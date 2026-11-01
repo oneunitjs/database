@@ -23,9 +23,12 @@ Built on [`pg`](https://node-postgres.com), with optional [`pg-cursor`](https://
 
 > **Monorepo** — [github.com/oneunitjs/database](https://github.com/oneunitjs/database)
 
+> **Latest Release:** See [CHANGELOG.md](CHANGELOG.md) for recent changes.
+
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
+- [When to Use Which Features](#when-to-use-which-features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
@@ -87,6 +90,110 @@ The full architectural diagram and module interaction details are in **ARCHITECT
 
 ---
 
+## When to Use Which Features
+
+`@oneunit/database` provides features for applications of all scales — from simple CRUD apps to distributed systems. Use this guide to determine which features your application needs.
+
+### Quick Decision Matrix
+
+| Use Case | Core Client | Query Builder | Models | Schema/Migrations | Sharding | Replication | Resharding | Distributed TX | Failover |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Simple App** — Single DB, basic CRUD | ✅ Required | ✅ Recommended | ✅ Optional | ✅ Recommended | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Growing App** — Single DB, needs abstractions | ✅ Required | ✅ Recommended | ✅ Recommended | ✅ Required | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Read-Heavy App** — Single primary, multiple replicas | ✅ Required | ✅ Recommended | ✅ Optional | ✅ Recommended | ❌ | ✅ Required | ❌ | ❌ | ❌ |
+| **Scaled App** — Multiple shards, partitioned data | ✅ Required | ✅ Recommended | ✅ Optional | ✅ Required | ✅ Required | ✅ Recommended | ✅ Optional | ❌ | ❌ |
+| **Enterprise App** — Multi-shard, HA, zero-downtime changes | ✅ Required | ✅ Recommended | ✅ Optional | ✅ Required | ✅ Required | ✅ Required | ✅ Required | ✅ Required | ✅ Required |
+
+### Feature Descriptions by Use Case
+
+#### 🟢 Core Features (Always Use)
+
+These are the foundation of the package and should be used by all applications:
+
+- **`client/`** — Connection pooling, query execution, transactions, health checks
+  - Use for: All database operations
+  - Example: `db.query()`, `db.transaction()`, `db.health()`
+
+- **`query/`** — SQL tagged template and query builder
+  - Use for: Safe SQL construction, preventing injection
+  - Example: `sql\`SELECT * FROM users WHERE id = ${id}\` `
+
+#### 🟡 Common Features (Most Applications)
+
+For typical applications that need data modeling and schema management:
+
+- **`model/`** — Table-level CRUD abstraction
+  - Use for: Reducing boilerplate for common operations
+  - When: Your app has multiple tables with similar patterns
+  - Example: `db.model("users").findById(id)`
+
+- **`schema/` & `migrate/`** — DDL helpers and versioned migrations
+  - Use for: Managing database schema evolution
+  - When: You need to deploy schema changes over time
+  - Example: `db.schema.create.table("users", {...})`
+
+- **`batch/`** — Chunked multi-row inserts
+  - Use for: Bulk data loading
+  - When: Inserting large datasets efficiently
+  - Example: `db.batch.insertMany("events", rows)`
+
+- **`stream/` & `cursor/`** — Streaming large result sets
+  - Use for: Processing large datasets without loading into memory
+  - When: Query results exceed available memory
+  - Requires: `pg-cursor` and/or `pg-query-stream` peer dependencies
+
+#### 🟠 Scale Features (Multi-Database Applications)
+
+For applications that have outgrown a single database:
+
+- **`replication/`** — Primary / read-replica routing
+  - Use for: Scaling read operations across multiple replicas
+  - When: Your read load exceeds what a single DB can handle
+  - Solves: Read scalability, read-heavy workloads
+  - Example: `db.query(sql, values, { readPreference: "replica-preferred" })`
+
+- **`sharding/`** — Multi-shard routing with 9 strategies
+  - Use for: Distributing data across multiple databases (shards)
+  - When: Your data volume or write throughput exceeds single DB limits
+  - Solves: Write scalability, data partitioning
+  - Choose strategy based on:
+    - **`hash`** — Simple, even distribution (remaps on shard count change)
+    - **`consistent-hash`** — Minimal key remapping when adding/removing shards
+    - **`range`** — Ordered data (time-series, IDs)
+    - **`directory`** — Explicit key-to-shard mapping
+    - **`tenant`** — Multi-tenant SaaS (tenant ID to shard)
+    - **`composite`** — Multi-component keys (tenant + user)
+    - **`geographic`** — Data residency requirements
+    - **`rendezvous`** — Highest random weight distribution
+    - **`weighted`** — Uneven shard capacities
+
+#### 🔴 Advanced Features (Distributed Systems)
+
+For sophisticated distributed applications requiring high availability and zero-downtime operations:
+
+- **`resharding/`** — Online data migration
+  - Use for: Moving data between shards without downtime
+  - When: You need to add/remove shards or rebalance data
+  - Solves: Shard rebalancing, capacity changes
+  - Lifecycle: plan → copy → validate → cutover → finalize
+  - Example: `db.resharding.plan()`, `db.resharding.start()`, `db.resharding.cutover()`
+
+- **`distributed-tx/`** — Cross-shard two-phase commit (2PC)
+  - Use for: Atomic operations across multiple shards
+  - When: You need ACID transactions spanning multiple databases
+  - Solves: Cross-shard data consistency
+  - Requires: `max_prepared_transactions > 0` on all PostgreSQL servers
+  - Example: `db.sharding.distributedTransaction(async (tx) => {...})`
+
+- **`failover/`** — High-availability provider and state machine
+  - Use for: Automatic failover when primary database fails
+  - When: You need high availability with minimal downtime
+  - Solves: Primary database failure recovery
+  - States: ACTIVE → DRAINING → DRAINED → REMOVED
+  - Example: Configure with replication for automatic primary/replica switching
+
+---
+
 ## Installation
 
 ```bash
@@ -125,6 +232,228 @@ await db.transaction(async (client) => {
 // Graceful shutdown
 await db.shutdown();
 ```
+
+### Quick Start for Different Use Cases
+
+#### Simple Application (Single Database)
+
+Most applications start here — a single PostgreSQL database with basic CRUD:
+
+```javascript
+import { createDatabase } from "@oneunit/database";
+
+const db = createDatabase({
+    connectionString: "postgresql://user:pass@localhost:5432/app",
+    max: 10, // connection pool size
+});
+
+// Query
+const users = await db.query("SELECT * FROM users WHERE status = $1", ["active"]);
+
+// Transaction
+await db.transaction(async (client) => {
+    await client.query("INSERT INTO users (email) VALUES ($1)", ["test@example.com"]);
+    await client.query("UPDATE stats SET count = count + 1");
+});
+
+// Shutdown
+await db.shutdown();
+```
+
+#### Read-Heavy Application (Primary + Replicas)
+
+Scale reads by routing queries to replicas:
+
+```javascript
+import { createDatabase } from "@oneunit/database";
+
+const db = createDatabase({
+    replication: {
+        enabled: true,
+        mode: "replica-preferred", // Read from replicas when available
+        primary: {
+            id: "primary",
+            connection: { connectionString: "postgresql://user:pass@localhost:5432/primary" },
+        },
+        replicas: [
+            { id: "replica-1", connection: { connectionString: "postgresql://user:pass@localhost:5433/replica1" } },
+            { id: "replica-2", connection: { connectionString: "postgresql://user:pass@localhost:5434/replica2" } },
+        ],
+        lagThresholdMs: 5000, // Exclude replicas lagging more than 5 seconds
+    },
+});
+
+// Writes always go to primary
+await db.query("INSERT INTO users (email) VALUES ($1)", ["test@example.com"]);
+
+// Reads prefer replicas, fall back to primary if needed
+const users = await db.query(
+    "SELECT * FROM users WHERE status = $1",
+    ["active"],
+    { readPreference: "replica-preferred" }
+);
+
+// Force read from primary (for strong consistency)
+const freshData = await db.query(
+    "SELECT * FROM users WHERE id = $1",
+    [userId],
+    { readPreference: "primary" }
+);
+```
+
+#### Multi-Tenant Application (Sharded by Tenant)
+
+Partition data by tenant for isolation and scalability:
+
+```javascript
+import { createDatabase } from "@oneunit/database";
+
+const db = createDatabase({
+    sharding: {
+        enabled: true,
+        strategy: "tenant", // Route by tenant ID
+        defaultShardId: "shard-0",
+        shards: [
+            { id: "shard-0", connection: { connectionString: "postgresql://user:pass@localhost:5432/tenant_a" } },
+            { id: "shard-1", connection: { connectionString: "postgresql://user:pass@localhost:5432/tenant_b" } },
+        ],
+    },
+});
+
+// Route queries to the correct shard using tenant ID as shard key
+await db.query(
+    "INSERT INTO users (tenant_id, email) VALUES ($1, $2)",
+    [tenantId, "user@example.com"],
+    { shardKey: tenantId }
+);
+
+// Transaction stays on one shard
+const user = await db.transaction(
+    async (client) => {
+        await client.query(
+            "INSERT INTO users (tenant_id, email) VALUES ($1, $2) RETURNING *",
+            [tenantId, "user@example.com"]
+        );
+    },
+    { shardKey: tenantId }
+);
+
+// Fan out to all shards for cross-tenant queries
+const allUsers = await db.sharding.fanOut({
+    query: "SELECT COUNT(*) FROM users",
+    merge: "sum",
+});
+```
+
+#### Enterprise Application (Sharded + Replicated + HA)
+
+Combine all features for a robust, scalable, highly available system:
+
+```javascript
+import { createDatabase } from "@oneunit/database";
+
+const db = createDatabase({
+    // Primary/replica for each shard
+    sharding: {
+        enabled: true,
+        strategy: "hash",
+        defaultShardId: "shard-0",
+        shards: [
+            {
+                id: "shard-0",
+                connection: { connectionString: "postgresql://user:pass@localhost:5432/shard0_primary" },
+                replication: {
+                    enabled: true,
+                    mode: "replica-preferred",
+                    replicas: [
+                        { id: "shard-0-replica-1", connection: { connectionString: "..." } },
+                    ],
+                },
+            },
+            {
+                id: "shard-1",
+                connection: { connectionString: "postgresql://user:pass@localhost:5432/shard1_primary" },
+                replication: {
+                    enabled: true,
+                    mode: "replica-preferred",
+                    replicas: [
+                        { id: "shard-1-replica-1", connection: { connectionString: "..." } },
+                    ],
+                },
+            },
+        ],
+        // Coordination database for distributed operations
+        coordination: {
+            connectionString: "postgresql://user:pass@localhost:5432/coordinator",
+        },
+    },
+    // HA provider for automatic failover
+    failover: {
+        enabled: true,
+        provider: "postgres", // or custom provider
+    },
+});
+
+// Cross-shard transaction with 2PC
+const result = await db.sharding.distributedTransaction(async (tx) => {
+    await tx.execute("shard-0", "UPDATE accounts SET balance = balance - $1 WHERE user_id = $2", [100, "user-1"]);
+    await tx.execute("shard-1", "UPDATE accounts SET balance = balance + $1 WHERE user_id = $2", [100, "user-2"]);
+});
+
+// Online resharding to add a new shard
+const rsharding = db.resharding;
+await rsharding.init();
+await db.sharding.addShard({
+    id: "shard-2",
+    connection: { connectionString: "postgresql://user:pass@localhost:5432/shard2_primary" },
+});
+await rsharding.plan(/* migration descriptor */);
+await rsharding.start();
+await rsharding.copyUnits();
+await rsharding.validate();
+await rsharding.cutover();
+await rsharding.finalize();
+```
+
+## Recent Improvements
+
+The package has undergone significant stability and reliability improvements:
+
+### 🛡️ Production Readiness
+
+- **Connection Leak Detection**: Automatic warnings after 5 minutes for unreleased connections (both manual and cursor-based)
+- **Connection Validation**: Optional validation of connections on checkout to prevent stale connection errors
+- **Enhanced Health Checks**: Pool statistics now include `pendingAcquire` and `max` for better monitoring
+- **Smart Retry Logic**: Retries no longer trigger on pool exhaustion errors, preventing cascading failures
+- **Cursor Cleanup**: Automatic cleanup and leak detection for server-side cursors
+
+### 📊 Monitoring & Observability
+
+```javascript
+// Get active manually acquired clients (for leak detection)
+const activeManualClients = db.getActiveManualClientCount();
+
+// Enhanced health checks with pool statistics
+const health = await db.check();
+console.log(health.pool);
+// {
+//   total: 10,
+//   idle: 5,
+//   waiting: 2,
+//   pendingAcquire: 0,
+//   max: 20
+// }
+```
+
+### 🔧 Configuration Options
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `validateConnections` | `boolean` | `false` | Validate connections on checkout (prevents stale connection errors) |
+| `logger` | `object` | `undefined` | Logger with `info`, `warn`, `error`, `debug` methods for connection lifecycle events |
+| `queryTimeout` | `number` | `0` | Default query timeout in milliseconds (application-level) |
+| `timeout` | `number` | `0` | Alias for queryTimeout |
+| `connectTimeout` | `number` | `0` | Connection acquisition timeout in milliseconds |
 
 Connection settings are read from the environment by default, or pass them explicitly:
 
@@ -1133,6 +1462,69 @@ npx vitest run test/client  # run one directory
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and the PR workflow.
+
+---
+
+## Support & Troubleshooting
+
+### Connection Issues
+
+**Problem:** Sporadic `ECONNRESET` or `connection terminated` errors.
+
+**Solution:** Enable connection validation:
+```javascript
+const db = createDatabase({
+    validateConnections: true, // Validate connections on first use
+});
+```
+
+### Connection Leaks
+
+**Problem:** Pool exhaustion errors (`POOL_EXHAUSTED`).
+
+**Diagnosis:**
+```javascript
+// Check for leaked manual clients
+const activeCount = db.getActiveManualClientCount();
+console.log(`Active manual clients: ${activeCount}`);
+
+// Check health for pool statistics
+const health = await db.check();
+console.log('Pool stats:', health.pool);
+```
+
+**Solution:** Ensure all manual clients are released:
+```javascript
+const client = await db.getClient();
+try {
+    await client.query('SELECT 1');
+} finally {
+    db.releaseClient(client); // Always release!
+}
+```
+
+### Cursor Leaks
+
+**Problem:** PostgreSQL memory usage keeps increasing.
+
+**Diagnosis:** Check for long-running cursors (warnings logged after 5 minutes).
+
+**Solution:** Always close cursors:
+```javascript
+// Using for/await (recommended)
+for await (const row of cursor) {
+    process(row);
+}
+// Cursor automatically closed
+
+// Manual cleanup
+try {
+    const cursor = await db.cursor(query);
+    // process cursor
+} finally {
+    await cursor.close();
+}
+```
 
 ---
 

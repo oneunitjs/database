@@ -8,6 +8,8 @@ describe("check", () => {
             totalCount: 3,
             idleCount: 2,
             waitingCount: 0,
+            pendingAcquireCount: 0,
+            options: { max: 10 },
             async query() {
                 return {};
             },
@@ -17,7 +19,7 @@ describe("check", () => {
 
         const result = await check();
         expect(result.status).toBe("up");
-        expect(result.pool).toEqual({ total: 3, idle: 2, waiting: 0 });
+        expect(result.pool).toEqual({ total: 3, idle: 2, waiting: 0, pendingAcquire: 0, max: 10 });
 
         const detailed = await health();
         expect(detailed.healthy).toBe(true);

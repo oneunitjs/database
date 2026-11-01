@@ -20,6 +20,35 @@ function computeDelay(attempt: number, options: RetryOptions): number {
     return Math.round(raw - spread / 2 + Math.random() * spread);
 }
 
+/**
+ * Check if an error is retryable. Excludes pool-related errors and connection
+ * errors that won't resolve with a retry.
+ */
+function isRetryableError(error: any): boolean {
+    // Don't retry on pool exhaustion errors
+    if (error.code === 'POOL_EXHAUSTED') {
+        return false;
+    }
+    
+    // Don't retry on connection refused errors from pool
+    if (error.code === 'ECONNREFUSED' && error.message?.includes?.('pool')) {
+        return false;
+    }
+    
+    // Don't retry on connection reset errors (usually indicates stale connection)
+    if (error.code === 'ECONNRESET') {
+        return false;
+    }
+    
+    // Don't retry on connection timeout during pool acquisition
+    if (error.code === 'ETIMEDOUT' && error.message?.includes?.('pool')) {
+        return false;
+    }
+    
+    // Check PostgreSQL transient errors
+    return isTransientError(error);
+}
+
 function throwIfAborted(signal: AbortSignal | undefined): void {
     if (signal?.aborted) {
         throw signal.reason instanceof Error
@@ -46,7 +75,7 @@ export async function withRetry<T>(
         maxDelay: options.maxDelay ?? 2000,
         factor: options.factor ?? 2,
         jitter: options.jitter ?? 0.2,
-        shouldRetry: options.shouldRetry ?? isTransientError,
+        shouldRetry: options.shouldRetry ?? isRetryableError,
         sleep: options.sleep ?? defaultSleep,
         signal: options.signal,
         onRetry: options.onRetry,
