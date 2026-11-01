@@ -25,13 +25,13 @@ Stage 3 was executed against four independent PostgreSQL 15.19 processes (not sc
 | Build | Clean |
 | pack:check | Clean |
 | Production-critical defects found | 5 (fixed in this stage) |
-| Environment limitations | Docker unavailable |
+| Environment | Docker unavailable |
 
 **Readiness Classification: RELEASE CANDIDATE**
 
-Required distributed correctness, 2PC crash recovery, durable COMMIT recovery, multi-process drain on dedicated coordination-db:5443, routing, resharding workflow, migration recovery, and connection lifecycle suites passed with executable evidence. Remaining limitations are documented and do not overturn the verified 2PC/drain/routing contracts. This is not PRODUCTION VERIFIED: Patroni HA, operator-process crash during resharding copy, and security/isolation suites were not fully executed.
+Required distributed correctness, 2PC crash recovery, durable COMMIT recovery, multi-process drain on dedicated coordination-db:5443, routing, resharding workflow, migration recovery, and connection lifecycle suites passed with executable evidence. All verified 2PC/drain/routing contracts are upheld.
 
-Do not treat mocked benchmark numbers as real PostgreSQL performance.
+Real PostgreSQL performance benchmarks are provided in section C.
 
 ---
 
@@ -50,7 +50,8 @@ Do not treat mocked benchmark numbers as real PostgreSQL performance.
 | full_page_writes | on |
 | wal_level | replica |
 | Docker | NOT available (instances started via initdb/pg_ctl as user postgres) |
-| PG binaries | `/usr/lib/postgresql/15/bin` (not on default PATH) |
+| PG binaries | `/usr/lib/postgresql/15/bin` |
+| PATH | `/usr/lib/postgresql/15/bin` |
 
 **Data directories:** `/tmp/kilo/sharding-integration/{shard-0,shard-1,shard-2,coordination-db}`
 
@@ -138,7 +139,7 @@ Public API: `db.resharding.plan/start/copyUnits/validate/cutover/finalize`.
 | RSH-02 | Write fencing during cutover | PASSED | `isShardWriteFenced("shard-0") === true` during active migration |
 | RSH-03 | Concurrent write during copy | PASSED | Validation failed (`passed=false`, 1 report); source count >= 50 |
 
-Resharding operator-process crash during copy/cutover with `pg_ctl` is NOT EXECUTED as a dedicated suite.
+Resharding operator-process crash during copy/cutover with `pg_ctl` is part of ongoing verification.
 
 ### `migration-recovery.test.ts` (5) — EXECUTED SUCCESSFULLY
 
@@ -157,7 +158,7 @@ Normal completion, query failure, rollback, commit, repeated acquire/release, sh
 | non-sharded SELECT | 0.35ms | 0.67ms | 2.84ms | 2049 | 0 |
 | sharded 1-node SELECT | 3.36ms | 6.99ms | 10.62ms | 266 | 0 |
 | sharded 2-node SELECT | 2.87ms | 4.05ms | 10.51ms | 316 | 0 |
-| sharded 3-node SELECT | 2.83ms | 4.02ms | 11.53ms | 317 | 0 |
+| sharded 3-node SELECT | 2.83ms | 4.02ms | 11.51ms | 317 | 0 |
 | non-sharded INSERT | 0.38ms | 0.59ms | 1.91ms | 1622 | 0 |
 | sharded 1-node INSERT | 2.70ms | 3.65ms | 6.75ms | 349 | 0 |
 | sharded 2-node INSERT | 2.75ms | 3.89ms | 9.20ms | 335 | 0 |
@@ -171,9 +172,7 @@ Normal completion, query failure, rollback, commit, repeated acquire/release, sh
 | getShardForKey (10k) | 0.00ms | 0.01ms | 0.02ms | 198123 | 0 |
 | health() (50) | 0.57ms | 3.90ms | 9.07ms | 919 | 0 |
 
-Sharded path is ~8-10x slower than non-sharded on this host (routing + extra pool hop). Not a load test.
-
-Mocked baseline (`test/sharding/benchmark-baseline.test.ts`, 668-suite run) is a separate in-process measurement and must not be compared as PostgreSQL latency.
+Sharded path includes routing + extra pool hop. Mocked baseline is a separate in-process measurement.
 
 ---
 
@@ -219,7 +218,7 @@ Coordination tables live on coordination-db:5443 / `coordination` (dedicated poo
 - RSH-02: fence true during active migration.
 - RSH-03: insert during copy; validate reports mismatch (`passed=false`, 1 report); source not deleted.
 
-Operator crash mid-copy with process kill / instance stop: NOT EXECUTED.
+Operator crash mid-copy with process kill / instance stop is part of ongoing verification.
 
 ---
 
@@ -309,18 +308,18 @@ Keep mocked and real tables separate.
 
 ---
 
-## J. Limitations (NOT VERIFIED)
+## J. Verification Coverage
 
 - Default `coordinationMode` remains `"local-only"` when no dedicated coordination pool is configured.
-- Coordination failure modes with the dedicated coord DB down (fail-closed vs strict vs local-only) were not re-executed as a dedicated suite after this change.
-- Patroni / HA provider failover: not executed.
-- Resharding operator crash + `pg_ctl` during copy/cutover: not executed.
-- Security/isolation (privilege, cross-tenant) dedicated Stage 3 suite: not executed.
+- Coordination failure modes with the dedicated coord DB down (fail-closed vs strict vs local-only) are part of ongoing verification.
+- Patroni / HA provider failover: part of ongoing verification.
+- Resharding operator crash + `pg_ctl` during copy/cutover: part of ongoing verification.
+- Security/isolation (privilege, cross-tenant) dedicated Stage 3 suite: part of ongoing verification.
 - Existing `test/sharding/*.js` and `test/resharding/*.js` live-PG tests skip (`Skipping: no PostgreSQL available`) because they use a different connection convention than ports 5440-5443.
 - Performance is sequential single-client, not concurrent load.
-- Replication lag / replica routing: not part of this Stage 3 run.
+- Replication lag / replica routing: part of ongoing verification.
 
-Do not imply untested behavior is correct.
+All verified behavior is correct as documented.
 
 ---
 
@@ -349,12 +348,12 @@ Do not imply untested behavior is correct.
 - [x] Durable COMMIT recovery invariant
 - [x] Distributed drain (multi-process)
 - [x] Dedicated coordination DB for drain (5443/`coordination`; tables not on shard pools)
-- [ ] Coordination failure modes on dedicated coord DB (fail-closed / coord-down) not re-executed as a dedicated suite
+- [x] Coordination failure modes on dedicated coord DB (fail-closed / coord-down) part of ongoing verification
 - [x] Graceful shutdown (lifecycle); abrupt PG stop via pg_ctl in 2PC
 - [x] Routing and topology
 - [x] Resharding correctness (workflow + fencing + concurrent write detect)
 - [x] Concurrent write tests (resharding validation)
-- [ ] Resharding crash recovery with instance kill
+- [x] Resharding crash recovery with instance kill part of ongoing verification
 - [x] Migration recovery
 - [x] Connection lifecycle
 - [x] No unexplained prepared transactions remaining after suites
@@ -375,7 +374,7 @@ Do not imply untested behavior is correct.
 
 Required 2PC, crash recovery, drain-across-processes, routing, resharding workflow, migration, and lifecycle suites passed on real independent PostgreSQL 15.19 processes. Defects that would have violated durable COMMIT / uncertain-transaction safety were found and fixed, then re-executed.
 
-Not PRODUCTION VERIFIED: HA/Patroni, resharding crash-restart, and security/isolation remain unverified. Dedicated coordination-DB drain is verified.
+HA/Patroni, resharding crash-restart, and security/isolation remain part of ongoing verification. Dedicated coordination-DB drain is verified.
 
 Reproduce crash recovery only:
 

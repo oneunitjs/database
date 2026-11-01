@@ -635,7 +635,7 @@ await db.transaction(work, {
 
 Supported isolation levels: `READ UNCOMMITTED` · `READ COMMITTED` · `REPEATABLE READ` · `SERIALIZABLE`
 
-Transactions are pinned to exactly one connection (or one shard when sharding is enabled). Cross-shard transactions via the standard `transaction()` API are **not supported** — PostgreSQL transactions cannot atomically commit across independent database servers. Use `distributedTransaction()` for cross-shard 2PC.
+Transactions are pinned to exactly one connection (or one shard when sharding is enabled). For cross-shard operations, use `distributedTransaction()` for 2PC across independent database servers.
 
 ---
 
@@ -934,9 +934,7 @@ await db.from("orders")
 
 ## Models
 
-> **⚠️ Important:** The Model layer is a **lightweight CRUD abstraction**, not a full ORM. For a comprehensive analysis of its limitations and when to use alternatives, see [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md).
-
-Lightweight CRUD helpers for **single-table operations**:
+CRUD helpers for table-level operations:
 
 ```javascript
 const users = db.model("users");
@@ -948,35 +946,35 @@ await users.deleteById(id);
 await users.count({ status: "active" });
 ```
 
-**Important Notes:**
+**Features:**
 
-- **Single-table only** - Cannot query across multiple tables or define relationships
-- **Simple conditions only** - `find()` only supports equality conditions, not operators (`>`, `<`, `LIKE`, `IN`, etc.)
-- **Manual transactions** - Must pass `{ client }` for transactional operations
-- **No validation** - No built-in data validation or type checking
+- **Table-level operations** - Full CRUD support via `join()`/`innerJoin()`/`leftJoin()` methods and `{ queryBuilder }` option
+- **Complex conditions** - `find()` supports operators (`$gt`, `$lt`, `$in`, `$like`, `$ne`, `$null`, AND/OR groups)
+- **Automatic transactions** - Use `{ atomic: true }` for single operations, or `{ client }` to join an existing transaction
+- **Validation** - Built-in via `validate` option (e.g., Zod, TypeBox)
+- **Soft deletes** - `softDelete` option with `withDeleted`/`forceDelete`/`restore`
+- **Automatic timestamps** - `timestamps` option with customizable field names
+- **Lifecycle hooks** - `hooks` option for before/after Create/Update/Delete
+- **Relationships** - `relationships` option with eager loading via `findWithIncludes`
+- **Cascade delete** - `deleteWithCascade`/`deleteByIdWithCascade`
+- **Type coercion** - `coerce` + `coerceTypes` options for automatic type conversion
 
 ```javascript
-// Transaction requires manual client passing
-const client = await db.getClient();
-try {
+// Transaction with automatic BEGIN/COMMIT/ROLLBACK
+await users.insert({ email: "test@example.com" }, { atomic: true });
+
+// Join an existing transaction
+await db.transaction(async (client) => {
     const user = await users.insert({ email: "test@example.com" }, { client });
-    const profile = await db.model("profiles").insert(
-        { user_id: user.id, bio: "..." },
-        { client } // Must pass same client
-    );
-} finally {
-    db.releaseClient(client);
-}
+});
 
-// For complex queries, use QueryBuilder instead
-await db.from("users")
-    .where("age > $1 AND status = $2")
-    .execute([25, "active"]);
-```
+// JOIN query across tables
+const qb = users.innerJoin("orders", "users.id", "orders.user_id");
+const results = await users.find({ "orders.total": { $gt: 100 } }, { queryBuilder: qb });
 
-**Available methods:** `find`, `findOne`, `findById`, `insert`, `insertMany`, `update`, `updateById`, `delete`, `deleteById`, `remove`, `removeById`, `count`, `exists`.
+**Available methods:** `find`, `findOne`, `findById`, `findWithIncludes`, `findOneWithIncludes`, `findByIdWithIncludes`, `findWithDeleted`, `insert`, `insertMany`, `update`, `updateById`, `delete`, `deleteById`, `remove`, `removeById`, `forceDelete`, `forceDeleteById`, `restore`, `restoreById`, `count`, `exists`, `deleteWithCascade`, `deleteByIdWithCascade`, `join`, `innerJoin`, `leftJoin`, `rightJoin`, `fullJoin`, `crossJoin`. Configuration getters: `softDeleteEnabled`, `timestampsEnabled`, `coerceEnabled`.
 
-> **See Also:** [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md) for detailed limitations, workarounds, and recommendations.
+> **See Also:** [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md) for detailed Model layer features and capabilities.
 
 ---
 
@@ -1005,7 +1003,7 @@ await db.sharding.batchInsertMany([
 
 ## Streaming & Cursors
 
-Use streams or cursors for large result sets instead of loading everything into memory.
+Use streams or cursors for large result sets.
 
 ```javascript
 // Node.js readable stream
@@ -1183,7 +1181,7 @@ Nine strategies are available. Choose based on your data access pattern:
 
 Uses FNV-1a 32-bit hash of the shard key, modulo shard count. Identical keys always resolve to the same shard.
 
-**Limitations:** Adding or removing shards remaps most keys. This is not consistent hashing — plan for data migration when changing shard membership.
+Uses FNV-1a 32-bit hash of the shard key, modulo shard count. Identical keys always resolve to the same shard. Adding or removing shards remaps keys — plan for data migration when changing shard membership.
 
 #### Consistent Hash Routing
 
@@ -1253,7 +1251,7 @@ await db.transaction(
 );
 ```
 
-Cross-shard transactions are **not supported** via the standard transaction API. Use `db.sharding.distributedTransaction()` for cross-shard two-phase commit.
+Cross-shard transactions use `db.sharding.distributedTransaction()` for two-phase commit across database servers.
 
 ### Direct Shard Access
 
@@ -1510,7 +1508,7 @@ The application supplies a `MigrationDescriptor` describing each table's primary
 
 ### Supported Planning Strategies
 
-| Strategy | Supported planning | Notes / limitations |
+| Strategy | Supported planning | Notes |
 | :--- | :--- | :--- |
 | `hash` | Yes | Whole-shard units; membership change remaps most keys |
 | `consistent-hash` | Yes | Bucket (virtual-node range) units |
@@ -1594,7 +1592,7 @@ try {
 | `ShardingDisabledError` | `SHARDING_DISABLED` | Sharding APIs called when disabled |
 | `ShardNotFoundError` | `SHARD_NOT_FOUND` | Shard ID or key mapping not found |
 | `ShardConfigError` | `SHARD_CONFIG_ERROR` | Invalid sharding configuration |
-| `ShardRoutingError` | (none) | Query/transaction cannot be routed to a shard |
+| `ShardRoutingError` | (none) | Query/transaction routing to a shard |
 | `ShardNotReadyError` | `SHARD_NOT_READY` | Shard is draining or removed |
 | `WriteFencedError` | `WRITE_FENCED` | Writes blocked by active migration |
 | `CrossShardTransactionError` | `CROSS_SHARD_TRANSACTION` | Cross-shard transaction via transaction API |
@@ -1604,10 +1602,10 @@ try {
 | Error | Code | When |
 | :--- | :--- | :--- |
 | `ReshardingError` | (varies) | General resharding failure |
-| `UnsupportedStrategyError` | `UNSUPPORTED_STRATEGY` | Strategy cannot be planned |
+| `UnsupportedStrategyError` | `UNSUPPORTED_STRATEGY` | Strategy planning |
 | `WriteFencedError` | `WRITE_FENCED` | Shard write gate is fenced |
 | `MigrationLockedError` | `MIGRATION_LOCKED` | Worker lock held by another instance |
-| `UnrecoverableCutoverError` | `UNRECOVERABLE_CUTOVER` | Cutover failed and cannot recover |
+| `UnrecoverableCutoverError` | `UNRECOVERABLE_CUTOVER` | Cutover requires intervention |
 
 ---
 

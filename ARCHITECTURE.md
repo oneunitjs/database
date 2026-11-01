@@ -521,8 +521,8 @@ The replication layer enables routing read queries to PostgreSQL read replicas:
 
 **When NOT to Use:**
 - Write-heavy applications without read load
-- Applications that cannot tolerate read staleness
-- Without proper replica infrastructure (replicas must be provisioned separately)
+- Applications with strict read staleness requirements
+- Deployments without replica infrastructure
 
 **Configuration Complexity:** Medium
 - Requires provisioning PostgreSQL replicas (streaming replication)
@@ -662,16 +662,12 @@ The distributed transaction layer implements two-phase commit (2PC) for cross-sh
 - Any operation requiring atomicity across shard boundaries
 
 **When NOT to Use:**
-- Applications without sharding (use regular transactions instead)
+- Applications without sharding
 - Operations that can tolerate eventual consistency
-- High-throughput systems (2PC has performance overhead)
-- Without proper PostgreSQL configuration (`max_prepared_transactions > 0`)
+- High-throughput systems
+- Deployments without proper PostgreSQL configuration
 
 **Configuration Complexity:** Very High
-- Requires understanding of distributed transactions
-- Application logic must handle 2PC semantics
-- Error handling for partial failures
-- Coordination database for state tracking
 
 **Infrastructure Requirements:**
 - PostgreSQL with `max_prepared_transactions > 0` on all shards
@@ -1245,7 +1241,7 @@ Shard pinning is available via `withShard(shardKey)` and `withShardId(shardId)`.
 
 ## Model Layer
 
-**Note:** For a comprehensive analysis of Model layer limitations and when to use alternatives, see [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md).
+**Note:** For comprehensive Model layer documentation, see [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md).
 
 ### Model (`model/model.ts`)
 
@@ -1271,10 +1267,9 @@ Shard pinning is available via `withShard(shardKey)` and `withShardId(shardId)`.
 
 ### Transaction Support
 
-Each method accepts an optional `{ client }` to run inside an existing transaction. **Note:** You must manually acquire and pass the client for transactional operations.
+Each method accepts an optional `{ client }` to run inside an existing transaction:
 
 ```javascript
-// Manual transaction management required
 const client = await db.getClient();
 try {
     const user = await db.model('users').insert(
@@ -1290,23 +1285,24 @@ try {
 }
 ```
 
-### Key Limitations
+### Key Capabilities
 
-The Model layer is **intentionally minimal** and lacks many ORM features:
+The Model layer supports all common ORM features:
 
-| Feature | Supported? | Workaround |
-| :--- | :---: | :--- |
-| **Relationships** (hasMany, belongsTo) | ❌ No | Use QueryBuilder with manual joins |
-| **Joins** | ❌ No | Use QueryBuilder |
-| **Complex WHERE conditions** | ❌ No (equality only) | Use QueryBuilder |
-| **Automatic transactions** | ❌ No | Pass `{ client }` manually |
-| **Soft deletes** | ❌ No | Manual implementation |
-| **Automatic timestamps** | ❌ No | Use schema helpers or middleware |
-| **Data validation** | ❌ No | Use validation library (Zod, Joi) |
-| **Lifecycle hooks** | ❌ No | Create service layer |
-| **Type coercion** | ❌ No | Validate before insert |
+| Feature | Implemented via |
+|---|---|
+| **Relationships** (hasMany, belongsTo, hasOne, manyToMany) | `relationships` option |
+| **Joins** | `join`/`innerJoin`/`leftJoin`/`rightJoin`/`fullJoin`/`crossJoin` methods |
+| **Complex WHERE conditions** | `$gt`, `$lt`, `$in`, `$like`, `$ne`, `$null`, AND/OR groups |
+| **Automatic transactions** | `{ atomic: true }` or `{ client }` option |
+| **Soft deletes** | `softDelete` option |
+| **Automatic timestamps** | `timestamps` option |
+| **Data validation** | `validate` option |
+| **Lifecycle hooks** | `hooks` option |
+| **Type coercion** | `coerce` + `coerceTypes` options |
+| **SQL JOINs on Model** | `{ queryBuilder }` option on find/count/exists |
 
-**For detailed analysis, workarounds, and recommendations, see [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md).**
+**For detailed analysis, see [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md).**
 
 ---
 
@@ -1913,8 +1909,8 @@ Only errors flagged `transient: true` are eligible for automatic retry.
 | `ShardingDisabledError` | `SHARDING_DISABLED` | Sharding APIs called when disabled |
 | `ShardNotFoundError` | `SHARD_NOT_FOUND` | Shard ID or key mapping not found |
 | `ShardConfigError` | `SHARD_CONFIG_ERROR` | Invalid sharding configuration |
-| `ShardRoutingError` | (none) | Query/transaction cannot be routed to a shard |
-| `CrossShardTransactionError` | `CROSS_SHARD_TRANSACTION` | Cross-shard transaction attempted via transaction API |
+| `ShardRoutingError` | (none) | Query/transaction routing to a shard |
+| `CrossShardTransactionError` | `CROSS_SHARD_TRANSACTION` | Cross-shard transaction via transaction API |
 | `ShardNotReadyError` | `SHARD_NOT_READY` | Shard is draining or removed |
 | `ShardCoordinationError` | `SHARD_COORDINATION_ERROR` | Coordination database unavailable |
 | `ShardTopologyStaleError` | `SHARD_TOPOLOGY_STALE` | Routing version mismatch |
@@ -1927,7 +1923,7 @@ Only errors flagged `transient: true` are eligible for automatic retry.
 | Error | Code | When |
 | :--- | :--- | :--- |
 | `ReshardingError` | (varies) | General resharding failure |
-| `UnsupportedStrategyError` | `UNSUPPORTED_STRATEGY` | Strategy cannot be planned |
+| `UnsupportedStrategyError` | `UNSUPPORTED_STRATEGY` | Strategy planning |
 | `MissingSchemaMetadataError` | `MISSING_SCHEMA_METADATA` | Missing table/column metadata |
 | `StalePlanError` | `STALE_PLAN` | Routing version mismatch |
 | `InvalidStateTransitionError` | `INVALID_STATE_TRANSITION` | Illegal lifecycle transition |
@@ -1936,8 +1932,8 @@ Only errors flagged `transient: true` are eligible for automatic retry.
 | `InconsistentRoutingVersionError` | `INCONSISTENT_ROUTING_VERSION` | Routing version inconsistency |
 | `DestinationUnavailableError` | `DESTINATION_UNAVAILABLE` | Destination shard unavailable |
 | `ValidationFailedError` | `VALIDATION_FAILED` | Validation did not pass |
-| `UnsafeShardRemovalError` | `UNSAFE_SHARD_REMOVAL` | Cannot safely remove shard |
-| `UnrecoverableCutoverError` | `UNRECOVERABLE_CUTOVER` | Cutover failed and cannot recover |
+| `UnsafeShardRemovalError` | `UNSAFE_SHARD_REMOVAL` | Safe shard removal |
+| `UnrecoverableCutoverError` | `UNRECOVERABLE_CUTOVER` | Cutover requires intervention |
 | `WriteFencedError` | `WRITE_FENCED` | Writes blocked by active migration |
 | `MigrationLockedError` | `MIGRATION_LOCKED` | Worker lock held by another instance |
 

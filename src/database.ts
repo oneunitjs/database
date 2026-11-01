@@ -1922,6 +1922,12 @@ export function createDatabase({
 
     const replication = buildReplicationApi();
 
+    // Expose getClient/releaseClient on the query function so the Model layer
+    // can auto-acquire a transaction client for atomic single operations
+    // (matching the insertMany atomic path).
+    unifiedQuery.getClient = client.getClient;
+    unifiedQuery.releaseClient = client.releaseClient;
+
     return {
         pool: primary,
 

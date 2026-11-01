@@ -16,6 +16,10 @@
 - **QueryBuilder:** Added JSON operator support via `whereJson()`, `whereJsonContains()`, `whereJsonContained()` and SQL helpers
 - **QueryBuilder:** Added Query Logging Context via `withQueryContext()` and `timeout()`
 - **Batch Operations:** Added `selectMany()`, `updateMany()`, `deleteMany()` batch methods
+- **Model Layer:** Added type coercion (`coerce` + `coerceTypes` options) for automatic type conversion on insert/update
+- **Model Layer:** Added SQL JOIN support via `join`/`innerJoin`/`leftJoin`/`rightJoin`/`fullJoin`/`crossJoin` methods + `{ queryBuilder }` option
+- **Model Layer:** Added automatic transaction support for single ops via `{ atomic: true }` option
+- **Model Layer:** Added `restoreById` returning single row
 
 ### 🐛 Bug Fixes
 
@@ -36,7 +40,7 @@
 
 - Added comprehensive use case guidance in README.md
 - Added "When to Use Each Layer" section in ARCHITECTURE.md
-- Documented limitations and appropriate use cases for all features
+- Documented capabilities and appropriate use cases for all features
 
 ---
 

@@ -834,6 +834,11 @@ export class QueryBuilder implements QueryBuilderType {
         return this;
     }
 
+    whereNotIn(column: string, values: unknown[]): this {
+        this._wheres.push({ connector: "AND", column, operator: "NOT IN", value: values });
+        return this;
+    }
+
     whereRaw(fragment: QueryFragment): this {
         this._wheres.push({ connector: "AND", text: fragment.text, values: fragment.values ?? [] });
         return this;
@@ -1123,7 +1128,7 @@ export class QueryBuilder implements QueryBuilderType {
                             nestedText = `${column} ${operator} ${this._params.add(nestedCond.value)}`;
                         }
                     }
-                    return nestedIndex === 0 ? nestedText : ` ${nestedCond.connector} ${nestedText}`;
+                    return nestedIndex === 0 ? nestedText : `${condition.connector} ${nestedText}`;
                 });
                 
                 text = `(${nestedParts.join(" ")})`;

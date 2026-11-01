@@ -957,6 +957,7 @@ export interface QueryBuilder {
     whereNull(column: string): QueryBuilder;
     whereNotNull(column: string): QueryBuilder;
     whereIn(column: string, values: unknown[]): QueryBuilder;
+    whereNotIn(column: string, values: unknown[]): QueryBuilder;
     whereRaw(fragment: SqlFragment): QueryBuilder;
     
     // JSON operators
@@ -1053,6 +1054,136 @@ export interface ModelFindOptions extends QueryOptions {
     offset?: number;
     client?: Pick<PoolClient, "query">;
     returning?: string[];
+    /**
+     * When true and no `client` is provided, the operation is wrapped in an
+     * automatic transaction (BEGIN/COMMIT/ROLLBACK) using a client acquired
+     * from the query runner. When false (default), the statement runs as a
+     * single auto-committed query.
+     */
+    atomic?: boolean;
+}
+
+/**
+ * Extended find options with support for complex WHERE conditions
+ */
+export interface ExtendedModelFindOptions extends ModelFindOptions {
+    /**
+     * Complex WHERE conditions. Can be:
+     * - Simple object: { status: 'active' }
+     * - Array of conditions: [{ status: 'active' }, { OR: [{ role: 'admin' }] }]
+     * - QueryBuilder function: (q) => q.where(...)
+     */
+    where?: Record<string, unknown> | Array<Record<string, unknown>> | ((q: QueryBuilder) => QueryBuilder);
+    /**
+     * Pre-built QueryBuilder to use instead of creating a new one.
+     * Useful for queries requiring JOINs, subqueries, CTEs, etc.
+     */
+    queryBuilder?: QueryBuilder;
+    /**
+     * Include soft-deleted records (when softDelete is enabled)
+     */
+    withDeleted?: boolean;
+    /**
+     * Force permanent deletion (bypass soft delete when enabled)
+     */
+    forceDelete?: boolean;
+}
+
+/**
+ * Hook types for Model lifecycle events
+ */
+export interface ModelHooks<T extends QueryResultRow = QueryResultRow> {
+    beforeCreate?: (data: Partial<T>) => Partial<T> | Promise<Partial<T>>;
+    afterCreate?: (result: T | null) => T | Promise<T>;
+    beforeUpdate?: (data: Partial<T>, where: Record<string, unknown>) => Partial<T> | Promise<Partial<T>>;
+    afterUpdate?: (result: T | null, where: Record<string, unknown>) => T | Promise<T>;
+    beforeDelete?: (where: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>;
+    afterDelete?: (result: T | null, where: Record<string, unknown>) => T | Promise<T>;
+}
+
+/**
+ * Options for creating a Model
+ */
+export interface ModelOptions<T extends QueryResultRow = QueryResultRow> {
+    /**
+     * Query function for database operations
+     */
+    query?: QueryRunner;
+    /**
+     * Table name
+     */
+    table: string;
+    /**
+     * Custom ID column name. Default: 'id'
+     */
+    idColumn?: string;
+    /**
+     * Logger
+     */
+    logger?: Logger;
+    /**
+     * Shard key for routing
+     */
+    shardKey?: string;
+    /**
+     * Shard ID for routing
+     */
+    shardId?: string;
+    /**
+     * Enable soft deletes. When enabled, delete operations set deleted_at timestamp
+     * instead of actually deleting. Use forceDelete to permanently delete.
+     */
+    softDelete?: boolean;
+    /**
+     * Custom field name for soft delete timestamp. Default: 'deleted_at'
+     */
+    softDeleteField?: string;
+    /**
+     * Enable automatic timestamps. When enabled, created_at and updated_at
+     * are automatically set on insert and update.
+     */
+    timestamps?: boolean;
+    /**
+     * Custom field name for created_at. Default: 'created_at'
+     */
+    createdAtField?: string;
+    /**
+     * Custom field name for updated_at. Default: 'updated_at'
+     */
+    updatedAtField?: string;
+    /**
+     * Validation function to run before create/update. Throw an error to reject.
+     */
+    validate?: (data: Record<string, unknown>, operation: 'create' | 'update') => Record<string, unknown> | Promise<Record<string, unknown>>;
+    /**
+     * Lifecycle hooks
+     */
+    hooks?: ModelHooks<T>;
+    /**
+     * Relationship definitions for eager loading
+     */
+    relationships?: {
+        [key: string]: {
+            type: 'hasMany' | 'belongsTo' | 'hasOne' | 'manyToMany';
+            model: string;
+            foreignKey?: string;
+            through?: string;
+            throughForeignKey?: string;
+            throughOtherKey?: string;
+        };
+    };
+    /**
+     * Enable automatic type coercion for insert/update data.
+     * When true, values are coerced based on coerceTypes or heuristic detection.
+     * Default: false (no coercion).
+     */
+    coerce?: boolean;
+    /**
+     * Explicit column-to-type mapping for type coercion.
+     * Supported types: 'string', 'number', 'boolean', 'date'.
+     * Only applies when coerce is true.
+     */
+    coerceTypes?: Record<string, 'string' | 'number' | 'boolean' | 'date'>;
 }
 
 export interface Model {
@@ -1061,22 +1192,237 @@ export interface Model {
     query(): QueryBuilder;
     builder(): QueryBuilder;
     select(): QueryBuilder;
-    find(where?: Record<string, unknown>, options?: ModelFindOptions): Promise<QueryResultRow[]>;
-    findOne(where?: Record<string, unknown>, options?: ModelFindOptions): Promise<QueryResultRow | null>;
-    findById(id: unknown, options?: ModelFindOptions): Promise<QueryResultRow | null>;
+    
+    /**
+     * Find records with optional complex WHERE conditions
+     * @param where - Simple object, array of conditions, or QueryBuilder function
+     * @param options - Find options including withDeleted and forceDelete
+     */
+    find(where?: Record<string, unknown> | Array<Record<string, unknown>>, options?: ExtendedModelFindOptions): Promise<QueryResultRow[]>;
+    
+    /**
+     * Find one record with optional complex WHERE conditions
+     */
+    findOne(where?: Record<string, unknown> | Array<Record<string, unknown>>, options?: ExtendedModelFindOptions): Promise<QueryResultRow | null>;
+    
+    /**
+     * Find by primary key
+     */
+    findById(id: unknown, options?: ExtendedModelFindOptions): Promise<QueryResultRow | null>;
+    
+    /**
+     * Insert a record with automatic timestamps, validation, and hooks
+     */
     insert(data: Record<string, unknown>, options?: ModelFindOptions): Promise<QueryResultRow | null>;
-    insertMany(rows: Record<string, unknown>[], options?: ModelFindOptions): Promise<QueryResultRow[]>;
+    
+    /**
+     * Insert multiple records with optional atomic transaction
+     * @param rows - Array of records to insert
+     * @param options - Options including atomic (default: true) and client for transaction
+     */
+    insertMany(rows: Record<string, unknown>[], options?: ModelFindOptions & { atomic?: boolean }): Promise<QueryResultRow[]>;
+    
+    /**
+     * Update records with automatic timestamps, validation, and hooks
+     */
     update(where: Record<string, unknown>, data: Record<string, unknown>, options?: ModelFindOptions): Promise<QueryResultRow[]>;
+    
+    /**
+     * Update by primary key
+     */
     updateById(id: unknown, data: Record<string, unknown>, options?: ModelFindOptions): Promise<QueryResultRow | null>;
+    
+    /**
+     * Delete records (soft delete if enabled)
+     */
     delete(where: Record<string, unknown>, options?: ModelFindOptions): Promise<QueryResultRow[]>;
+    
+    /**
+     * Delete by primary key (soft delete if enabled)
+     */
     deleteById(id: unknown, options?: ModelFindOptions): Promise<QueryResultRow | null>;
-    remove(where: Record<string, unknown>, options?: ModelFindOptions): Promise<QueryResultRow[]>;
-    removeById(id: unknown, options?: ModelFindOptions): Promise<QueryResultRow | null>;
-    count(where?: Record<string, unknown>, options?: ModelFindOptions): Promise<number>;
-    exists(where?: Record<string, unknown>, options?: ModelFindOptions): Promise<boolean>;
+    
+    /**
+     * Alias for delete
+     */
+    remove(where: Record<string, unknown>, options?: ModelFindOptions & { forceDelete?: boolean }): Promise<QueryResultRow[]>;
+    
+    /**
+     * Alias for deleteById
+     */
+    removeById(id: unknown, options?: ModelFindOptions & { forceDelete?: boolean }): Promise<QueryResultRow | null>;
+    
+    /**
+     * Count records with optional complex WHERE conditions
+     */
+    count(where?: Record<string, unknown> | Array<Record<string, unknown>>, options?: ExtendedModelFindOptions): Promise<number>;
+    
+    /**
+     * Check if records exist with optional complex WHERE conditions
+     */
+    exists(where?: Record<string, unknown> | Array<Record<string, unknown>>, options?: ExtendedModelFindOptions): Promise<boolean>;
+    
+    // ========== NEW METHODS ==========
+    
+    /**
+     * Find records including soft-deleted ones (when softDelete is enabled)
+     */
+    findWithDeleted(where?: Record<string, unknown> | Array<Record<string, unknown>>, options?: ModelFindOptions): Promise<QueryResultRow[]>;
+    
+    /**
+     * Permanently delete records (bypasses soft delete)
+     */
+    forceDelete(where: Record<string, unknown>, options?: ModelFindOptions): Promise<QueryResultRow[]>;
+    
+    /**
+     * Permanently delete by primary key (bypasses soft delete)
+     */
+    forceDeleteById(id: unknown, options?: ModelFindOptions): Promise<QueryResultRow | null>;
+    
+    /**
+     * Restore soft-deleted records
+     */
+    restore(where: Record<string, unknown>, options?: ModelFindOptions): Promise<QueryResultRow[]>;
+    
+    /**
+     * Restore soft-deleted record by primary key
+     */
+    restoreById(id: unknown, options?: ModelFindOptions): Promise<QueryResultRow | null>;
+    
+    // ========== CONFIGURATION GETTERS ==========
+    
+    /**
+     * Check if soft delete is enabled
+     */
+    readonly softDeleteEnabled: boolean;
+    
+    /**
+     * Check if timestamps are enabled
+     */
+    readonly timestampsEnabled: boolean;
+    
+    /**
+     * Get the hooks configuration
+     */
+    readonly hooks?: ModelHooks<QueryResultRow>;
+    
+    /**
+     * Get the validation function
+     */
+    readonly validate?: (data: Record<string, unknown>, operation: 'create' | 'update') => Record<string, unknown> | Promise<Record<string, unknown>>;
+    
+    // ========== RELATIONSHIP METHODS ==========
+    
+    /**
+     * Find records and include related data (eager loading)
+     * @param where - WHERE conditions
+     * @param options - Find options
+     * @param include - Relationships to include
+     */
+    findWithIncludes(
+        where?: Record<string, unknown> | Array<Record<string, unknown>>,
+        options?: ExtendedModelFindOptions,
+        include?: string[]
+    ): Promise<QueryResultRow[]>;
+    
+    /**
+     * Find one record and include related data (eager loading)
+     * @param where - WHERE conditions
+     * @param options - Find options
+     * @param include - Relationships to include
+     */
+    findOneWithIncludes(
+        where?: Record<string, unknown> | Array<Record<string, unknown>>,
+        options?: ExtendedModelFindOptions,
+        include?: string[]
+    ): Promise<QueryResultRow | null>;
+    
+    /**
+     * Find by primary key and include related data (eager loading)
+     * @param id - Primary key value
+     * @param options - Find options
+     * @param include - Relationships to include
+     */
+    findByIdWithIncludes(
+        id: unknown,
+        options?: ExtendedModelFindOptions,
+        include?: string[]
+    ): Promise<QueryResultRow | null>;
+    
+    /**
+     * Delete records with cascade to related tables
+     * @param where - WHERE conditions
+     * @param options - Options including cascade relationships
+     */
+    deleteWithCascade(
+        where: Record<string, unknown>,
+        options?: ModelFindOptions & { cascade?: string[] }
+    ): Promise<QueryResultRow[]>;
+    
+    /**
+     * Delete by primary key with cascade to related tables
+     * @param id - Primary key value
+     * @param options - Options including cascade relationships
+     */
+    deleteByIdWithCascade(
+        id: unknown,
+        options?: ModelFindOptions & { cascade?: string[] }
+    ): Promise<QueryResultRow | null>;
+    
+    /**
+     * Get the relationships configuration
+     */
+    readonly relationships?: {
+        [key: string]: {
+            type: 'hasMany' | 'belongsTo' | 'hasOne' | 'manyToMany';
+            model: string;
+            foreignKey?: string;
+            through?: string;
+            throughForeignKey?: string;
+            throughOtherKey?: string;
+        };
+    };
+
+    /**
+     * Check if type coercion is enabled
+     */
+    readonly coerceEnabled: boolean;
+
+    // ========== JOIN METHODS ==========
+
+    /**
+     * Join another table (delegates to QueryBuilder.join).
+     * Returns a QueryBuilder that can be passed via { queryBuilder } to find/findOne/count/exists.
+     */
+    join(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+
+    /**
+     * INNER JOIN another table.
+     */
+    innerJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+
+    /**
+     * LEFT JOIN another table.
+     */
+    leftJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+
+    /**
+     * RIGHT JOIN another table.
+     */
+    rightJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+
+    /**
+     * FULL JOIN another table.
+     */
+    fullJoin(table: string | QueryBuilder, on: string | SqlFragment | string[] | QueryBuilder, alias?: string): QueryBuilder;
+
+    /**
+     * CROSS JOIN another table.
+     */
+    crossJoin(table: string | QueryBuilder, alias?: string): QueryBuilder;
 }
 
-export type ModelFactory = (table: string, options?: { idColumn?: string }) => Model;
+export type ModelFactory = (table: string, options?: ModelOptions) => Model;
 
 export interface MigrationDefinition {
     id?: string;
