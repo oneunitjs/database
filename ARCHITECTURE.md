@@ -1245,25 +1245,68 @@ Shard pinning is available via `withShard(shardKey)` and `withShardId(shardId)`.
 
 ## Model Layer
 
+**Note:** For a comprehensive analysis of Model layer limitations and when to use alternatives, see [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md).
+
 ### Model (`model/model.ts`)
 
-`createModelFactory()` → `createModel(table, { idColumn })` produces a `Model` with table-level CRUD abstraction:
+`createModelFactory()` → `createModel(table, { idColumn })` produces a `Model` with **table-level CRUD abstraction**.
 
-- `find(where?, options?)` → `QueryResultRow[]`
-- `findOne(where?, options?)` → `QueryResultRow | null`
-- `findById(id, options?)` → `QueryResultRow | null`
-- `insert(data, options?)` → `QueryResultRow | null`
-- `insertMany(rows, options?)` → `QueryResultRow[]`
-- `update(where, data, options?)` → `QueryResultRow[]`
-- `updateById(id, data, options?)` → `QueryResultRow | null`
-- `delete(where, options?)` → `QueryResultRow[]`
-- `deleteById(id, options?)` → `QueryResultRow | null`
-- `remove(where, options?)` → `QueryResultRow[]`
-- `removeById(id, options?)` → `QueryResultRow | null`
-- `count(where?, options?)` → `number`
-- `exists(where?, options?)` → `boolean`
+> **Important:** The Model layer is a **lightweight CRUD helper**, not a full ORM. It does NOT support relationships, joins, soft deletes, automatic timestamps, validation, hooks, or complex query conditions.
 
-Each method accepts an optional `{ client }` to run inside an existing transaction.
+### Core Methods
+
+- `find(where?, options?)` → `QueryResultRow[]` - Find by simple equality conditions
+- `findOne(where?, options?)` → `QueryResultRow | null` - Find one record
+- `findById(id, options?)` → `QueryResultRow | null` - Find by primary key
+- `insert(data, options?)` → `QueryResultRow | null` - Insert single record
+- `insertMany(rows, options?)` → `QueryResultRow[]` - Batch insert (chunks to respect parameter limits)
+- `update(where, data, options?)` → `QueryResultRow[]` - Update matching records
+- `updateById(id, data, options?)` → `QueryResultRow | null` - Update by primary key
+- `delete(where, options?)` → `QueryResultRow[]` - Delete matching records
+- `deleteById(id, options?)` → `QueryResultRow | null` - Delete by primary key
+- `remove(where, options?)` → `QueryResultRow[]` - Alias for delete
+- `removeById(id, options?)` → `QueryResultRow | null` - Alias for deleteById
+- `count(where?, options?)` → `number` - Count matching records
+- `exists(where?, options?)` → `boolean` - Check if records exist
+
+### Transaction Support
+
+Each method accepts an optional `{ client }` to run inside an existing transaction. **Note:** You must manually acquire and pass the client for transactional operations.
+
+```javascript
+// Manual transaction management required
+const client = await db.getClient();
+try {
+    const user = await db.model('users').insert(
+        { name: 'Alice' },
+        { client } // Must pass transaction client
+    );
+    const profile = await db.model('profiles').insert(
+        { user_id: user.id },
+        { client } // Must pass same client
+    );
+} finally {
+    db.releaseClient(client);
+}
+```
+
+### Key Limitations
+
+The Model layer is **intentionally minimal** and lacks many ORM features:
+
+| Feature | Supported? | Workaround |
+| :--- | :---: | :--- |
+| **Relationships** (hasMany, belongsTo) | ❌ No | Use QueryBuilder with manual joins |
+| **Joins** | ❌ No | Use QueryBuilder |
+| **Complex WHERE conditions** | ❌ No (equality only) | Use QueryBuilder |
+| **Automatic transactions** | ❌ No | Pass `{ client }` manually |
+| **Soft deletes** | ❌ No | Manual implementation |
+| **Automatic timestamps** | ❌ No | Use schema helpers or middleware |
+| **Data validation** | ❌ No | Use validation library (Zod, Joi) |
+| **Lifecycle hooks** | ❌ No | Create service layer |
+| **Type coercion** | ❌ No | Validate before insert |
+
+**For detailed analysis, workarounds, and recommendations, see [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md).**
 
 ---
 

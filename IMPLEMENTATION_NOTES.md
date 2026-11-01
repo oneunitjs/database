@@ -1,6 +1,14 @@
-# Implementation Notes: Core Client Layer Fixes
+# Implementation Notes
 
-This document details the fixes implemented to address real-world issues in the Core Client Layer of `@oneunit/database`.
+This document details implementation notes for `@oneunit/database`.
+
+> **Note:** For Model layer limitations and analysis, see [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md).
+
+---
+
+## Core Client Layer Fixes
+
+This section details the fixes implemented to address real-world issues in the Core Client Layer of `@oneunit/database`.
 
 ## Overview
 
@@ -14,6 +22,8 @@ The following production-grade reliability features were implemented to address 
 6. **Manual Client Tracking** - Leak detection for manual checkouts
 
 All changes are **backward compatible** and disabled by default where appropriate.
+
+> **For Model Layer:** See [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md) for comprehensive analysis of Model layer limitations, workarounds, and recommendations.
 
 ---
 

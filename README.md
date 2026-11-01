@@ -934,7 +934,9 @@ await db.from("orders")
 
 ## Models
 
-Lightweight CRUD helpers for common table operations:
+> **⚠️ Important:** The Model layer is a **lightweight CRUD abstraction**, not a full ORM. For a comprehensive analysis of its limitations and when to use alternatives, see [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md).
+
+Lightweight CRUD helpers for **single-table operations**:
 
 ```javascript
 const users = db.model("users");
@@ -946,9 +948,35 @@ await users.deleteById(id);
 await users.count({ status: "active" });
 ```
 
-Pass `{ client }` to run inside an existing transaction.
+**Important Notes:**
 
-Model methods: `find`, `findOne`, `findById`, `insert`, `insertMany`, `update`, `updateById`, `delete`, `deleteById`, `remove`, `removeById`, `count`, `exists`.
+- **Single-table only** - Cannot query across multiple tables or define relationships
+- **Simple conditions only** - `find()` only supports equality conditions, not operators (`>`, `<`, `LIKE`, `IN`, etc.)
+- **Manual transactions** - Must pass `{ client }` for transactional operations
+- **No validation** - No built-in data validation or type checking
+
+```javascript
+// Transaction requires manual client passing
+const client = await db.getClient();
+try {
+    const user = await users.insert({ email: "test@example.com" }, { client });
+    const profile = await db.model("profiles").insert(
+        { user_id: user.id, bio: "..." },
+        { client } // Must pass same client
+    );
+} finally {
+    db.releaseClient(client);
+}
+
+// For complex queries, use QueryBuilder instead
+await db.from("users")
+    .where("age > $1 AND status = $2")
+    .execute([25, "active"]);
+```
+
+**Available methods:** `find`, `findOne`, `findById`, `insert`, `insertMany`, `update`, `updateById`, `delete`, `deleteById`, `remove`, `removeById`, `count`, `exists`.
+
+> **See Also:** [MODEL_LAYER_LIMITATIONS.md](MODEL_LAYER_LIMITATIONS.md) for detailed limitations, workarounds, and recommendations.
 
 ---
 
