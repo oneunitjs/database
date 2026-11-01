@@ -641,7 +641,11 @@ Transactions are pinned to exactly one connection (or one shard when sharding is
 
 ## SQL Fragments & Query Builder
 
+The QueryBuilder and SQL helpers provide a safe, expressive way to construct parameterized SQL queries.
+
 ### Tagged Template
+
+The `sql` tagged template produces parameterized SQL with `.text` and `.values`. All interpolated values become `$1, $2, ...` parameters — never interpolated into SQL text.
 
 ```javascript
 import { createDatabase, sql } from "@oneunit/database";
@@ -658,7 +662,29 @@ const fragment = sql`
 await db.query(fragment.text, fragment.values);
 ```
 
+**Safe identifier quoting:**
+
+```javascript
+// SAFE - identifier() properly quotes table/column names
+sql`SELECT * FROM ${sql.identifier('users')}`
+
+// SAFE - parameterized value
+sql`SELECT * FROM users WHERE id = ${userId}`
+```
+
+**New SQL Helper Functions:**
+
+- **Window Functions:** `sql.rowNumber()`, `sql.rank()`, `sql.denseRank()`
+- **JSON Operators:** `sql.jsonGetText()`, `sql.jsonGet()`, `sql.jsonContains()`, `sql.jsonContained()`, `sql.jsonArrayLength()`, `sql.jsonObjectKeys()`, `sql.jsonPath()`
+- **Aggregations:** `sql.countDistinct()`, `sql.stringAgg()`, `sql.arrayAgg()`, `sql.jsonAgg()`, `sql.jsonObjectAgg()`
+- **CASE Expressions:** `sql.caseWhen()`
+- **Utility:** `sql.quoteString()`
+
 ### Fluent Query Builder
+
+The fluent QueryBuilder supports SELECT, INSERT, UPDATE, DELETE with comprehensive query construction.
+
+**Basic SELECT:**
 
 ```javascript
 const { rows } = await db.from("users")
@@ -668,9 +694,232 @@ const { rows } = await db.from("users")
     .limit(20);
 ```
 
-> Identifiers are quoted. Values are never interpolated into SQL text.
+**Common Table Expressions (CTEs):**
 
-Shard pinning:
+```javascript
+const { rows } = await db.with('active_users',
+    db.from('users').select('id', 'name').where({ active: true })
+  )
+  .with('recent_orders',
+    db.from('orders').select('user_id', 'amount').where({ created_at: '> 2023-01-01' })
+  )
+  .select('au.name', 'ro.amount')
+  .from('active_users au')
+  .join('recent_orders ro', 'au.id = ro.user_id')
+  .execute();
+
+// Recursive CTE
+db.withRecursive('numbers',
+    db.from('series_generate_integer(1, 10)').select('n')
+  )
+  .select('*').from('numbers');
+```
+
+**Window Functions:**
+
+```javascript
+import { sql } from "@oneunit/database";
+
+// Using helper functions
+db.from('employees')
+  .select('name', 'salary', sql.rowNumber(['department'], ['salary DESC']))
+  .execute();
+
+// Using window() method
+db.window('ranking', {
+    partitionBy: ['department'],
+    orderBy: [{ column: 'salary', direction: 'DESC' }]
+  })
+  .select('name', 'salary', sql`RANK() OVER ranking`)
+  .from('employees')
+  .execute();
+```
+
+**Complex Joins:**
+
+```javascript
+db.from('users')
+  .innerJoin('orders', 'users.id = orders.user_id')
+  .leftJoin('profiles', 'users.id = profiles.user_id')
+  .rightJoin('audit_logs', 'users.id = audit_logs.user_id')
+  .fullOuterJoin('metadata', 'users.id = metadata.user_id')
+  .crossJoin('categories')
+  .select('users.name', 'orders.total', 'profiles.bio')
+  .execute();
+```
+
+**Subqueries:**
+
+```javascript
+// Subquery in FROM
+db.select('name', 'order_count')
+  .from(
+    db.from('orders').select('user_id', sql`COUNT(*)`).groupBy('user_id'),
+    'user_orders'
+  )
+  .execute();
+
+// Subquery in WHERE (EXISTS)
+db.from('users')
+  .whereExists(
+    db.from('orders').where('orders.user_id = users.id')
+  )
+  .execute();
+
+// Subquery in SELECT
+db.from('users')
+  .select(
+    'name',
+    db.from('orders').select(sql`COUNT(*)`).where('orders.user_id = users.id'), 'order_count'
+  )
+  .execute();
+```
+
+**Nested WHERE Groups:**
+
+```javascript
+db.from('users')
+  .whereGroup(qb => qb
+    .where({ status: "active" })
+    .orWhere({ role: "admin" })
+  )
+  .orWhereGroup(qb => qb
+    .where({ department: "engineering" })
+    .where({ level: "> 5" })
+  )
+  .execute();
+```
+
+**Query Combination (UNION, INTERSECT, EXCEPT):**
+
+```javascript
+const activeUsers = db.from('users').select('id').where({ active: true });
+const admins = db.from('users').select('id').where({ role: "admin" });
+
+// UNION
+activeUsers.union(admins).execute();
+
+// UNION ALL
+activeUsers.unionAll(admins).execute();
+
+// INTERSECT
+activeUsers.intersect(admins).execute();
+
+// EXCEPT
+activeUsers.except(admins).execute();
+```
+
+**CASE Expressions:**
+
+```javascript
+db.from('orders')
+  .select(
+    'id',
+    'amount',
+    db.selectCase('discount_level', cb => cb
+      .when(sql`amount > 1000`, 'gold')
+      .when(sql`amount > 500`, 'silver')
+      .else('bronze')
+    )
+  )
+  .execute();
+
+// Or using sql.caseWhen()
+db.from('orders')
+  .select('id', sql.caseWhen()
+    .when(sql`amount > 1000`, 'gold')
+    .when(sql`amount > 500`, 'silver')
+    .else('bronze'), 'discount_level'
+  )
+  .execute();
+```
+
+**DISTINCT ON:**
+
+```javascript
+db.from('messages')
+  .distinctOn(['conversation_id'])
+  .select('conversation_id', 'content', 'created_at')
+  .orderBy('conversation_id', 'created_at DESC')
+  .execute();
+```
+
+**Row Locking:**
+
+```javascript
+db.from('accounts')
+  .where({ id: accountId })
+  .forUpdate()
+  .execute();
+
+// FOR NO KEY UPDATE
+db.from('accounts')
+  .where({ id: accountId })
+  .forNoKeyUpdate()
+  .execute();
+
+// SKIP LOCKED
+db.from('jobs')
+  .where({ status: "pending" })
+  .forUpdate()
+  .skipLocked()
+  .execute();
+```
+
+**JSON Operators:**
+
+```javascript
+// Query JSON fields
+db.from('users')
+  .whereJson('metadata', '@>', { premium: true })
+  .execute();
+
+// JSON contains
+db.from('users')
+  .whereJsonContains('metadata', { tags: ['vip'] })
+  .execute();
+
+// Using sql helpers
+db.from('users')
+  .where(sql.jsonGetText('metadata', 'name'), 'John')
+  .execute();
+```
+
+**Batch Operations:**
+
+```javascript
+// Batch SELECT
+await db.batch.selectMany("users", [1, 2, 3, 4, 5], { chunkSize: 100 });
+
+// Batch UPDATE
+await db.batch.updateMany("users", updates, { chunkSize: 100 });
+
+// Batch DELETE
+await db.batch.deleteMany("users", ids, { chunkSize: 100 });
+```
+
+**Query Logging Context:**
+
+```javascript
+db.from('users')
+  .withQueryContext({ requestId: 'abc-123', userId: '42' })
+  .execute();
+
+// Access context (for logging)
+const context = db.from('users').withQueryContext({ traceId: 'xyz' }).getQueryContext();
+```
+
+**Transaction Timeout:**
+
+```javascript
+db.from('users')
+  .timeout(5000) // 5 second timeout
+  .execute();
+```
+
+> **Identifiers are quoted.** Values are never interpolated into SQL text.
+
+**Shard Pinning:**
 
 ```javascript
 await db.from("orders")
@@ -678,6 +927,8 @@ await db.from("orders")
     .withShard(user_id)
     .execute();
 ```
+
+> **See Also:** [QUERY_BUILDER_IMPROVEMENTS.md](QUERY_BUILDER_IMPROVEMENTS.md) for comprehensive documentation of all QueryBuilder features, including advanced use cases, examples, and migration guides.
 
 ---
 

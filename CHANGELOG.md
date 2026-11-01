@@ -4,6 +4,19 @@
 
 ### 🚀 Features
 
+- **QueryBuilder:** Added comprehensive enhancements including CTE (WITH clause) support via `with()` and `withRecursive()`
+- **QueryBuilder:** Added Window Function support via `window()` method and helper functions `sql.rowNumber()`, `sql.rank()`, `sql.denseRank()`
+- **QueryBuilder:** Added Complex Join support (RIGHT JOIN, FULL OUTER JOIN, CROSS JOIN, LEFT OUTER JOIN, RIGHT OUTER JOIN)
+- **QueryBuilder:** Added Subquery support in FROM, WHERE, SELECT via `from()`, `selectSubquery()`, `whereExists()`, `whereNotExists()`, `whereInSubquery()`, `whereNotInSubquery()`
+- **QueryBuilder:** Added Nested WHERE groups via `whereGroup()` and `orWhereGroup()` methods
+- **QueryBuilder:** Added Query Combination (UNION, UNION ALL, INTERSECT, INTERSECT ALL, EXCEPT, EXCEPT ALL)
+- **QueryBuilder:** Added CASE expression support via `selectCase()` and `sql.caseWhen()`
+- **QueryBuilder:** Added DISTINCT ON support via `distinctOn()`
+- **QueryBuilder:** Added Row Locking support (FOR UPDATE, FOR NO KEY UPDATE, SKIP LOCKED) via `forUpdate()`, `forNoKeyUpdate()`, `skipLocked()`
+- **QueryBuilder:** Added JSON operator support via `whereJson()`, `whereJsonContains()`, `whereJsonContained()` and SQL helpers
+- **QueryBuilder:** Added Query Logging Context via `withQueryContext()` and `timeout()`
+- **Batch Operations:** Added `selectMany()`, `updateMany()`, `deleteMany()` batch methods
+
 ### 🐛 Bug Fixes
 
 - **Connection Management:** Fixed connection leak detection with automatic warnings after 5 minutes of unreleased connections

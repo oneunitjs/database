@@ -1109,11 +1109,137 @@ Retry logic is opt-in via `withRetry()`, which only retries errors classified as
 
 ### SQL Tagged Template (`query/sql.ts`)
 
-The `sql` tagged template produces a `SqlFragment` with `.text` and `.values`. Helpers include `sql.raw()`, `sql.identifier()`, `sql.quoteIdent()`, `sql.join()`, and `sql.isFragment()`. All interpolated values are appended to `.values` and sent as `$1, $2, …` parameters — never interpolated into the SQL text.
+The `sql` tagged template produces a `SqlFragment` with `.text` and `.values`. All interpolated values are appended to `.values` and sent as `$1, $2, …` parameters — never interpolated into the SQL text.
+
+**Core Helpers:**
+- `sql.raw(text)` - Raw SQL (use with caution, only trusted input)
+- `sql.identifier(name)` - Safely quote identifier
+- `sql.quoteIdent(name)` - Quote identifier (alias)
+- `sql.join(values)` - JOIN array for IN clauses
+- `sql.isFragment(value)` - Check if value is a SqlFragment
+- `sql.quoteString(value)` - Quote string literal
+
+**Window Function Helpers:**
+- `sql.rowNumber(partitionBy?, orderBy?)` - ROW_NUMBER() window function
+- `sql.rank(partitionBy?, orderBy?)` - RANK() window function
+- `sql.denseRank(partitionBy?, orderBy?)` - DENSE_RANK() window function
+- `sql.window(name, { partitionBy, orderBy })` - Define a named window for reuse
+
+**JSON Operator Helpers:**
+- `sql.jsonGetText(column, path)` - Extract text from JSON
+- `sql.jsonGet(column, path)` - Extract JSON value
+- `sql.jsonContains(column, value)` - JSON contains value
+- `sql.jsonContained(column, value)` - JSON contained in value
+- `sql.jsonArrayLength(column, path?)` - JSON array length
+- `sql.jsonObjectKeys(column)` - JSON object keys
+- `sql.jsonPath(column, path)` - JSON path query
+
+**Aggregation Helpers:**
+- `sql.countDistinct(column)` - COUNT(DISTINCT column)
+- `sql.stringAgg(column, delimiter)` - STRING_AGG
+- `sql.arrayAgg(column)` - ARRAY_AGG
+- `sql.jsonAgg(column)` - JSON_AGG
+- `sql.jsonObjectAgg(key, value)` - JSON_OBJECT_AGG
+
+**Utility:**
+- `sql.quoteString(value)` - Quote string literal
+
+**CASE Expression Helper:**
+- `sql.caseWhen()` - Start building CASE expression with .when() and .else()
+
+All interpolated values are automatically parameterized.
 
 ### Query Builder (`query/builder.ts`)
 
-`createQueryBuilder()` returns a fluent, thenable `QueryBuilder`. Supported methods: `select`, `distinct`, `insert`, `values`, `update`, `delete`, `returning`, `where`, `orWhere`, `whereNull`, `whereNotNull`, `whereIn`, `whereRaw`, `join`, `leftJoin`, `groupBy`, `having`, `orderBy`, `limit`, `offset`, `onConflict`, `toSQL`, `execute`, `first`, and `then`. Shard pinning is available via `withShard(shardKey)` and `withShardId(shardId)`. The builder implements `.then()` so `await db.from("users").select()` works without calling `.execute()`.
+`createQueryBuilder()` returns a fluent, thenable `QueryBuilder`. The builder implements `.then()` so `await db.from("users").select()` works without explicitly calling `.execute()`.
+
+**Core CRUD Methods:**
+- `select(...columns)` - SELECT columns
+- `distinct(value)` - DISTINCT modifier
+- `distinctOn(columns)` - PostgreSQL DISTINCT ON
+- `insert(values)` / `values(values)` - INSERT data
+- `update(values)` - UPDATE data
+- `delete()` - DELETE mode
+- `returning(...columns)` - RETURNING clause
+- `from(table)` - FROM table or subquery
+- `execute()` - Execute the query
+- `first()` - Execute and return first row
+- `toSQL()` - Return { text, values } without executing
+
+**Filtering & Conditions:**
+- `where(column, operator, value)` - WHERE conditions
+- `orWhere(column, operator, value)` - OR conditions
+- `whereNull(column)` - WHERE NULL
+- `whereNotNull(column)` - WHERE NOT NULL
+- `whereIn(column, values)` - WHERE IN
+- `whereRaw(fragment)` - Raw SQL WHERE clause
+- `whereGroup(callback)` - Nested AND group
+- `orWhereGroup(callback)` - Nested OR group
+- `whereExists(subquery)` - EXISTS subquery
+- `whereNotExists(subquery)` - NOT EXISTS subquery
+- `whereInSubquery(column, subquery)` - IN subquery
+- `whereNotInSubquery(column, subquery)` - NOT IN subquery
+
+**Joins (9 types):**
+- `join(table, on)` - INNER JOIN
+- `innerJoin(table, on)` - INNER JOIN
+- `leftJoin(table, on)` - LEFT JOIN
+- `rightJoin(table, on)` - RIGHT JOIN
+- `fullJoin(table, on)` - FULL JOIN
+- `fullOuterJoin(table, on)` - FULL OUTER JOIN
+- `leftOuterJoin(table, on)` - LEFT OUTER JOIN
+- `rightOuterJoin(table, on)` - RIGHT OUTER JOIN
+- `crossJoin(table)` - CROSS JOIN
+
+**Common Table Expressions:**
+- `with(name, query, columns?, materialized?)` - Add CTE
+- `withRecursive(name, query, columns?)` - Add recursive CTE
+
+**Window Functions:**
+- `window(name, { partitionBy, orderBy, frame })` - Define named window
+
+**Query Combination:**
+- `union(query)` - UNION
+- `unionAll(query)` - UNION ALL
+- `intersect(query)` - INTERSECT
+- `intersectAll(query)` - INTERSECT ALL
+- `except(query)` - EXCEPT
+- `exceptAll(query)` - EXCEPT ALL
+
+**CASE Expressions:**
+- `selectCase(alias, callback)` - CASE expression in SELECT
+
+**JSON Operators:**
+- `whereJson(column, operator, value)` - JSON operator WHERE
+- `whereJsonContains(column, value)` - JSON contains
+- `whereJsonContained(column, value)` - JSON contained
+
+**Row Locking:**
+- `forUpdate()` - FOR UPDATE
+- `forNoKeyUpdate()` - FOR NO KEY UPDATE
+- `skipLocked()` - SKIP LOCKED
+
+**Grouping & Aggregation:**
+- `groupBy(...columns)` - GROUP BY
+- `having(column, operator, value)` - HAVING clause
+- `orderBy(column, direction)` - ORDER BY
+- `limit(value)` - LIMIT
+- `offset(value)` - OFFSET
+
+**Sharding:**
+- `withShard(shardKey)` - Route to shard by key
+- `withShardId(shardId)` - Route to specific shard
+
+**Metadata & Context:**
+- `withQueryContext(context)` - Add logging context
+- `getQueryContext()` - Get current context
+- `timeout(ms)` - Query timeout
+
+**Subqueries:**
+- `selectSubquery(subquery, alias)` - Subquery in SELECT
+- `from(subquery, alias)` - Subquery in FROM
+
+Shard pinning is available via `withShard(shardKey)` and `withShardId(shardId)`.
 
 ---
 
