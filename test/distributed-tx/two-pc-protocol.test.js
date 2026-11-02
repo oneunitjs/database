@@ -240,22 +240,4 @@ describe("2PC Protocol — global decision durability invariants", () => {
         );
     });
 
-    it("COMMIT decision is persisted before COMMIT PREPARED — verified by code inspection", async () => {
-        // The coordinator's commit() method persists global_decision = 'COMMIT'
-        // durably BEFORE issuing COMMIT PREPARED on any participant.
-        // Once durable, recovery must continue committing — it cannot change
-        // to ABORTED. Verified by source inspection of
-        // distributed-transaction-coordinator.ts commit() method:
-        //   1. UPDATE ... global_decision = 'COMMIT' (durable decision)
-        //   2. COMMIT PREPARED for each participant
-        expect(true).toBe(true);
-    });
-
-    it("PREPARE TRANSACTION uses deterministic identifier — verified by code inspection", async () => {
-        // The coordinator generates prepared transaction IDs as
-        // `pg_${transactionId}_${shardId}` and issues PREPARE TRANSACTION
-        // with that identifier. Verified by source inspection of
-        // distributed-transaction-coordinator.ts prepare() method.
-        expect(true).toBe(true);
-    });
 });

@@ -116,11 +116,4 @@ describe("Suite F - Large and resumable backfills", () => {
         });
     });
 
-    it("F-documentation: expandContract provides no batched, resumable, checkpointed backfill engine", async () => {
-        // This test documents the gap: expandContract executes each step's SQL once per call,
-        // ignores batchSize for batching, and persists no checkpoint. Resumable backfills
-        // (interrupt between batches, resume without duplication/skipping) are not supported
-        // by the current expandContract implementation.
-        expect(true).toBe(true);
-    });
 });

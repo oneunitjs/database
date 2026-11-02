@@ -10,3 +10,10 @@ export * from "./cursor.js";
 export * from "./check.js";
 export * from "./shutdown.js";
 export * from "./batch.js";
+export * from "./pool-monitor.js";
+export * from "./pool-size-calculator.js";
+
+export * from "./pool-stats.js";
+export * from "./pool-exhaustion.js";
+export * from "./dynamic-pool-resizer.js";
+export * from "./pool-reservation.js";

@@ -54,3 +54,12 @@ export type {
     DistributedTxCoordinatorOptions,
 } from "./distributed-transaction-coordinator.js";
 export type { DistributedTransactionExecuteOptions } from "./distributed-transaction-context.js";
+
+export { TransactionSemaphore } from "./transaction-semaphore.js";
+export type { SemaphoreOptions } from "./transaction-semaphore.js";
+export { CircuitBreaker } from "./circuit-breaker.js";
+export type { CircuitBreakerOptions, CircuitState } from "./circuit-breaker.js";
+export { DistributedTransactionManager } from "./distributed-transaction-manager.js";
+export type { DistributedTransactionManagerOptions } from "./distributed-transaction-manager.js";
+
+export * from "./connection-throttler.js";

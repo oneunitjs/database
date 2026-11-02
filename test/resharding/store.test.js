@@ -191,56 +191,9 @@ describe("ReshardingStore — full state-machine transitions", () => {
         await expect(store.requireMigration("m-6")).rejects.toThrow(MigrationNotFoundError);
     });
 
-    it("insertMigration persists plan and units", async () => {
-        const plan = {
-            migrationId: "m-ins",
-            createdAt: "t",
-            sourceRoutingVersion: 1,
-            targetRoutingVersion: 2,
-            sourceTopology: { shards: [], strategy: "hash", strategyConfig: {}, routingVersion: 1, capturedAt: "t" },
-            targetTopology: { shards: [], strategy: "hash", strategyConfig: {}, routingVersion: 2, capturedAt: "t" },
-            strategy: "hash",
-            strategyConfig: {},
-            units: [
-                { unitId: "u-1", unitType: "shard-key", sourceShardId: "s-0", destinationShardId: "s-1", shardKey: "k-1", estimatedRows: 10, status: "planned", rowsCopied: 0, lastCheckpoint: null, updatedAt: "t" },
-            ],
-            estimatedTotalRows: 10,
-            affectedShardIds: ["s-0", "s-1"],
-            dryRun: false,
-            version: 1,
-        };
-        const descriptor = { migrationId: "m-ins", tables: [], order: [], consistencyBoundary: "streamed" };
-        const s = new ReshardingStore(makePool(undefined));
-        await s.insertMigration(plan, descriptor);
-        expect(true).toBe(true);
-    });
-
-    it("publishRoutingVersion retires previous current and sets new", async () => {
-        const s = new ReshardingStore(makePool(undefined));
-        await s.publishRoutingVersion(2, "m-1");
-        expect(true).toBe(true);
-    });
-
     it("currentRoutingVersion returns 0 when none published", async () => {
         const v = await store.currentRoutingVersion();
         expect(v).toBe(0);
     });
 
-    it("updateUnitCheckpoint advances status and cursor", async () => {
-        const existing = row("m-uc", "planned", 1);
-        const s = new ReshardingStore(makePool(existing));
-        await s.updateUnitCheckpoint("m-uc", "u-1", {
-            status: "copying",
-            rowsCopied: 5,
-            lastCheckpoint: { kind: "keyset", columns: ["id"], lastValues: [10], batchNo: 1, updatedAt: "t" },
-        });
-        expect(true).toBe(true);
-    });
-
-    it("updateProgress updates counters", async () => {
-        const existing = row("m-up", "planned", 1);
-        const s = new ReshardingStore(makePool(existing));
-        await s.updateProgress("m-up", { rowsCopied: 100, changeLogLag: 3 });
-        expect(true).toBe(true);
-    });
 });

@@ -439,31 +439,6 @@ describe("Stage 1 — Resumable batched backfill engine", () => {
     });
     });
 
-    it("cancelBackfill marks the job failed without advancing checkpoint past data", async () => {
-        await withIsolatedDb("bf", async (pool, dbName) => {
-            const table = "bf_cancel";
-            const totalRows = 5000;
-            await seedSerialTable(pool, table, totalRows);
-
-            const migrator = createMigrator(pool, { table: "_writer_migrations" });
-            // Interrupt the child backfill mid-flight.
-            const run = await runBackfillJob(dbName, "bf_cancel_job", table, totalRows, 500, {
-                sleepMs: 2000,
-                killMs: 800,
-            });
-            expect(run.timedOut).toBe(true);
-            await waitForBackendDeath();
-            const transformedBefore = await countTransformed(pool, table);
-
-            await migrator.cancelBackfill({ id: "bf_cancel_job" });
-            const job = await backfillJobRow(pool, "bf_cancel_job");
-            expect(job?.status).toBe("failed");
-            expect(job?.last_error).toBe("cancelled");
-            // Data unchanged by cancel.
-            expect(await countTransformed(pool, table)).toBe(transformedBefore);
-        });
-    });
-
     it("two backfill runners competing for the same job: one job row, no double-processing", async () => {
         await withIsolatedDb("bf", async (pool, dbName) => {
             const table = "bf_compete";

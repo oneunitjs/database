@@ -647,6 +647,8 @@ export interface ShardingApi {
     addShard(config: ShardConfig, hooks?: ReshardingHooks): Promise<void>;
     removeShard(shardId: string, hooks?: ReshardingHooks): Promise<void>;
     readonly migrate?: ShardMigrationTracker;
+    /** Schema sync service (if enabled). */
+    schemaSync?: import("./sharding/schema-sync-service.js").SchemaSyncService;
     /**
      * Execute an arbitrary callback with a dedicated connection on a specific
      * shard. Intended for DDL and administrative operations that must target
@@ -941,6 +943,17 @@ export interface CreateDatabaseOptions extends DatabaseConfig {
      * When sharding is enabled, use `ShardConfig.replication` instead.
      */
     replication?: ReplicationConfig;
+    /**
+     * Schema auto-sync configuration.
+     */
+    schemaSync?: {
+        enabled?: boolean;
+        coordinationPool?: Pool | PoolConfig | string;
+        syncOptions?: any;
+        workerOptions?: any;
+        hooks?: any;
+        blockWritesOnInconsistency?: boolean;
+    };
 }
 
 export interface PoolStats {
@@ -2533,6 +2546,10 @@ export interface Database {
      * side effect of addShard/removeShard.
      */
     resharding?: import("./resharding/resharding-types.js").ReshardingApi;
+    /** Schema sync service (if enabled) */
+    schemaSync?: import("./sharding/schema-sync-service.js").SchemaSyncService;
+    /** Schema sync worker (if enabled) */
+    schemaSyncWorker?: import("./sharding/schema-sync-worker.js").SchemaSyncWorker;
     /**
      * Replication API. Only present when replication is enabled (non-sharded
      * via `CreateDatabaseOptions.replication`, or per-shard via

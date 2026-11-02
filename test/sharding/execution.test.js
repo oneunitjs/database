@@ -589,7 +589,6 @@ describe("unified API (db.query / db.transaction with sharding)", () => {
         );
 
         // All queries should complete successfully
-        expect(true).toBe(true);
     });
 
     it("existing non-sharded db.query() works unchanged", async () => {

@@ -52,6 +52,8 @@ import { ShardRouter } from "./sharding/shard-router.js";
 import { ShardHealth } from "./sharding/shard-health.js";
 import { ShardMigrationTracker } from "./sharding/shard-migration.js";
 import { createReshardingManager } from "./resharding/resharding-manager.js";
+import { SchemaSyncService } from "./sharding/schema-sync-service.js";
+import { SchemaSyncWorker } from "./sharding/schema-sync-worker.js";
 import type { ReshardingApi } from "./resharding/resharding-types.js";
 import { fencingLockKey } from "./resharding/resharding-schema.js";
 import {
@@ -255,6 +257,7 @@ function buildShardingApi(
     defaultHooks?: ReshardingHooks,
     shardReplicationManagers?: Map<string, ReplicationManager>,
     reshardingApi?: ReshardingApi,
+    schemaSyncService?: import("./sharding/schema-sync-service.js").SchemaSyncService,
     distributedTxCoordinator?: DistributedTransactionCoordinator,
     shardExecutor?: ShardExecutor,
     shardMetrics?: ReturnType<typeof createShardMetrics>,
@@ -1016,6 +1019,7 @@ function buildShardingApi(
         rebalanceTracker: rebalanceTracker!,
         executeOnShard: executeOnShardApi,
         migrate: migrate ?? undefined,
+        schemaSync: schemaSyncService,
         get distributedTx() {
             return distributedTxCoordinator;
         },
@@ -1326,6 +1330,9 @@ export function createDatabase({
     // Online resharding manager (declared early so the write path can
     // consult it for fencing enforcement; initialized below).
     let reshardingApi: ReshardingApi | undefined;
+    let schemaSyncService: import("./sharding/schema-sync-service.js").SchemaSyncService | undefined;
+    let schemaSyncWorker: import("./sharding/schema-sync-worker.js").SchemaSyncWorker | undefined;
+    let schemaSyncOwnedCoordinationPool: Pool | undefined;
 
     const client = createClient(primary, logger, {
         hooks: hookSystem,
@@ -1774,6 +1781,44 @@ export function createDatabase({
                 });
             }
         }
+
+        // Schema auto-sync (optional)
+        const schemaSyncCfg = (config as any)?.schemaSync;
+        if (schemaSyncCfg?.enabled) {
+            const provided = schemaSyncCfg.coordinationPool;
+            let coordinationPool = primary;
+            if (provided) {
+                if (typeof provided === "string") {
+                    coordinationPool = createPool({ logger, config: { connectionString: provided } });
+                    schemaSyncOwnedCoordinationPool = coordinationPool;
+                } else if (typeof provided === "object" && typeof (provided as any).query === "function") {
+                    coordinationPool = provided as Pool;
+                } else {
+                    coordinationPool = createPool({ logger, config: provided as any });
+                    schemaSyncOwnedCoordinationPool = coordinationPool;
+                }
+            }
+            schemaSyncService = new SchemaSyncService({
+                coordinationPool,
+                shardManager: manager,
+                logger,
+                hooks: schemaSyncCfg.hooks,
+                options: schemaSyncCfg.syncOptions ?? {},
+                syncOptions: schemaSyncCfg.syncOptions ?? {},
+            });
+            if (process.env.NODE_ENV !== "test" && schemaSyncCfg.workerOptions?.enabled !== false) {
+                schemaSyncWorker = new SchemaSyncWorker(
+                    schemaSyncService,
+                    manager,
+                    schemaSyncCfg.workerOptions ?? {},
+                );
+                try {
+                    schemaSyncWorker.start();
+                } catch {
+                    // best effort
+                }
+            }
+        }
     }
 
     // Distributed transaction coordinator — uses the primary pool for
@@ -1809,6 +1854,7 @@ export function createDatabase({
         shardingHooks,
         shardReplicationManagers,
         reshardingApi,
+        schemaSyncService,
         distributedTxCoordinator,
         shardExecutor,
         shardMetrics,
@@ -1925,6 +1971,18 @@ export function createDatabase({
         } else {
             await shutdownSystem.shutdown();
         }
+        try {
+            schemaSyncWorker?.stop?.();
+        } catch {
+            // ignore
+        }
+        if (schemaSyncOwnedCoordinationPool) {
+            try {
+                await schemaSyncOwnedCoordinationPool.end();
+            } catch {
+                // ignore
+            }
+        }
     };
 
     const replication = buildReplicationApi();
@@ -1994,6 +2052,10 @@ export function createDatabase({
 
         // online resharding / data migration
         resharding: reshardingApi,
+
+        // schema auto-sync
+        schemaSync: schemaSyncService,
+        schemaSyncWorker: schemaSyncWorker,
 
         // replication — primary / read replica routing
         replication,
