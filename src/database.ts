@@ -30,8 +30,8 @@ import type { PoolConfig } from "pg";
 import { ShardExecutor } from "./sharding/shard-executor.js";
 import { createShardMetrics } from "./sharding/shard-metrics.js";
 import { ShardRebalanceTracker } from "./sharding/shard-rebalance-tracker.js";
-import { createPool } from "./client/pool.js";
-import { createClient } from "./client/client.js";
+import { createPool, clearActiveConnections } from "./client/pool.js";
+import { createClient, clearManualClients } from "./client/client.js";
 import { createTransaction } from "./client/transaction.js";
 import { createStream } from "./client/stream.js";
 import { createCursor } from "./client/cursor.js";
@@ -66,6 +66,7 @@ import {
     ShardNotFoundError,
     ShardRoutingError,
     ShardConfigError,
+    CrossShardTransactionError,
 } from "./sharding/errors.js";
 import { ReshardingError, WriteFencedError } from "./resharding/resharding-errors.js";
 
@@ -99,6 +100,14 @@ function normalizeShardingConfig(
     const strategy = config.strategy as ShardStrategyName | undefined;
     if (strategy && knownStrategies.includes(strategy)) {
         const result = { ...config } as ShardingConfig;
+        // P2-2: a default shard is required when sharding is enabled so un-keyed
+        // writes cannot silently land on an arbitrary shard.
+        if (config.enabled && !result.defaultShardId) {
+            throw new ShardConfigError(
+                `Sharding is enabled but no defaultShardId is configured. ` +
+                `Configure defaultShardId explicitly (one of: ${config.shards?.map((s) => s.id).join(", ")}).`,
+            );
+        }
         if (strategy === "directory") {
             const legacyDir = (config as LegacyShardingConfig).routing?.directory;
             if (legacyDir) {
@@ -111,20 +120,15 @@ function normalizeShardingConfig(
     if (config.enabled && config.shards && config.shards.length > 0) {
         const defaultShardId = config.defaultShardId;
         if (!defaultShardId) {
-            // Backward-compatible fallback: use the first shard as the default.
-            // This is implicit routing ambiguity — consumers should configure
-            // defaultShardId explicitly. Emit a deprecation warning.
-            if (typeof console !== "undefined" && console.warn) {
-                console.warn(
-                    "[@oneunit/database] Sharding is enabled but no defaultShardId is configured. " +
-                    `Falling back to first shard "${config.shards[0].id}". ` +
-                    "Please set defaultShardId explicitly to avoid implicit routing ambiguity.",
-                );
-            }
+            throw new ShardConfigError(
+                `Sharding is enabled but no defaultShardId is configured. ` +
+                `Configure defaultShardId explicitly (one of: ${config.shards.map((s) => s.id).join(", ")}) ` +
+                "to avoid implicit routing ambiguity.",
+            );
         }
         return {
             enabled: true,
-            strategy: "hash",
+            strategy: "consistent-hash",
             shards: config.shards,
             defaultShardId: defaultShardId ?? config.shards[0].id,
             coordination: (config as LegacyShardingConfig).coordination as PoolConfig | undefined,
@@ -135,14 +139,14 @@ function normalizeShardingConfig(
                 | undefined,
             abandonedOperationTimeoutMs: (config as LegacyShardingConfig)
                 .abandonedOperationTimeoutMs as number | undefined,
-        } as HashShardingConfig;
+        } as ShardingConfig;
     }
 
     return {
         enabled: false,
-        strategy: "hash",
+        strategy: "consistent-hash",
         shards: [],
-    } as HashShardingConfig;
+    } as ShardingConfig;
 }
 
 /**
@@ -668,9 +672,10 @@ function buildShardingApi(
         });
         await Promise.all(workers);
 
-        // Apply merge strategy
+        // Apply merge strategy. "application" leaves results unmerged so the
+        // caller performs application-side aggregation.
         let merged: T[] = results;
-        if (merge !== "none" && results.length > 0) {
+        if (merge !== "none" && merge !== "application" && results.length > 0) {
             const first = results[0] as Record<string, unknown>;
             const numericKeys = Object.keys(first).filter(
                 (k) => typeof first[k] === "number",
@@ -1670,6 +1675,15 @@ export function createDatabase({
         txOptions: TransactionOptions = {},
     ): Promise<T> {
         const shardKey = txOptions.shardKey;
+        // P2-1: sharded transactions require an explicit shardKey so un-keyed
+        // writes cannot silently land on the default shard.
+        if (manager && !shardKey) {
+            throw new CrossShardTransactionError({
+                requestedShard: "none",
+                actualShard: "default",
+                operation: "transaction",
+            });
+        }
         const resolution = shardExecutor.resolve({
             shardKey,
             readPreference: "primary",
@@ -1782,8 +1796,14 @@ export function createDatabase({
             }
         }
 
-        // Schema auto-sync (optional)
-        const schemaSyncCfg = (config as any)?.schemaSync;
+        // Schema auto-sync (optional). When sharding is enabled and no explicit
+        // schemaSync config is provided, auto-enable it using the primary pool
+        // as the coordination store so multi-shard DDL drift can be repaired
+        // (P2-3).
+        let schemaSyncCfg = (config as any)?.schemaSync;
+        if (normalizedSharding?.enabled && !schemaSyncCfg) {
+            schemaSyncCfg = { enabled: true, coordinationPool: primary };
+        }
         if (schemaSyncCfg?.enabled) {
             const provided = schemaSyncCfg.coordinationPool;
             let coordinationPool = primary;
@@ -1963,6 +1983,10 @@ export function createDatabase({
                 // Continue shutting down remaining endpoints.
             }
         }
+        // Clear module-level connection-tracking sets so leaked clients can be
+        // garbage-collected across createDatabase() generations (P2-7).
+        clearActiveConnections();
+        clearManualClients();
         // Top-level replication manager owns the primary pool in non-sharded mode.
         if (topLevelReplicationManager) {
             await topLevelReplicationManager.shutdown();

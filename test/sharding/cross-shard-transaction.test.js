@@ -67,6 +67,7 @@ describe("Cross-shard transaction detection", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -90,6 +91,7 @@ describe("Cross-shard transaction detection", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0", "postgresql://localhost:5432/shard0"),
@@ -116,6 +118,7 @@ describe("Cross-shard transaction detection", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -177,6 +180,7 @@ describe("Cross-shard transaction detection", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },

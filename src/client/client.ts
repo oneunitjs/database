@@ -10,6 +10,10 @@ const manualClients = new Set<PoolClient>();
 // Connection leak warning threshold (5 minutes)
 const CONNECTION_LEAK_TIMEOUT = 300000;
 
+export function clearManualClients(): void {
+    manualClients.clear();
+}
+
 function isPlainObject(value: unknown): boolean {
     return value !== null && typeof value === "object" && !Array.isArray(value) && !Buffer.isBuffer(value);
 }
@@ -37,10 +41,8 @@ function buildQuery(text: unknown, values: unknown, options: unknown): { config:
 
     if (isPlainObject(text)) {
         const config = { ...(text as Record<string, unknown>) } as unknown as QueryConfig;
-        if (Array.isArray(values)) {
-            config.values = values;
-            return { config, options: (options as QueryOptions) ?? {} };
-        }
+        // When the first argument is a query config object it already carries
+        // `values`; the second argument is options, never a values override.
         return { config, options: isPlainObject(values) ? (values as QueryOptions) : (options as QueryOptions ?? {}) };
     }
 
@@ -92,9 +94,12 @@ export function createClient(
     const clientLogger = logger;
     const hooks = options.hooks ?? createHooks({ logger, ...(options.instrumentation ?? {}) });
     const configuredRetry = normalizeRetryOption(options.retry);
+    // Default retry for transient PostgreSQL errors (serialization failures,
+    // deadlocks, connection loss) so transient failures self-heal without the
+    // caller opting in (P2-9). Non-transient errors are never retried.
     const defaultRetry = configuredRetry
         ? { retryOnTimeout: false, ...configuredRetry }
-        : null;
+        : { retryOnTimeout: false, retries: 3, baseDelay: 50, maxDelay: 2000 };
     const defaultTimeout = options.queryTimeout ?? options.timeout ?? 0;
     const defaultConnectTimeout = options.connectTimeout ?? 0;
 
@@ -161,6 +166,9 @@ export function createClient(
                 }
             }
         }, CONNECTION_LEAK_TIMEOUT);
+        if (leakTimer.unref) {
+            leakTimer.unref();
+        }
         
         // Wrap release to clean up tracking
         const originalRelease = client.release.bind(client);

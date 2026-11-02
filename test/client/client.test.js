@@ -53,7 +53,7 @@ describe("client extended", () => {
         expect(await db2.queryOne("SELECT * FROM users")).toBeNull();
     });
 
-    it("query does not retry by default", async () => {
+    it("query retries transient errors by default", async () => {
         let attempts = 0;
         const db = createClient(makePool(() => makeClient(async () => {
             attempts += 1;
@@ -61,7 +61,7 @@ describe("client extended", () => {
         })));
 
         await expect(db.query("SELECT 1")).rejects.toThrow();
-        expect(attempts).toBe(1);
+        expect(attempts).toBeGreaterThan(1);
     });
 
     it("query retries genuinely transient errors when opted in", async () => {

@@ -49,6 +49,9 @@ function wrapClient(client: PoolClient, pool: Pool, logger?: Logger, validateCon
             }
         }
     }, CONNECTION_VALIDATION_TIMEOUT);
+    if (leakTimeout.unref) {
+        leakTimeout.unref();
+    }
     
     // Clear timeout when connection is released
     const originalRelease = client.release.bind(client);
@@ -90,6 +93,10 @@ function wrapClient(client: PoolClient, pool: Pool, logger?: Logger, validateCon
  * overrides. Only connection-safe fields are logged; credentials are never
  * included in log output.
  */
+export function clearActiveConnections(): void {
+    activeConnections.clear();
+}
+
 export function createPool({
     logger,
     config = {},
@@ -104,12 +111,33 @@ export function createPool({
     const mergedConfig = loadDatabaseConfig(config);
     const pool = new Pool(mergedConfig);
     
-    // Override connect to wrap clients with validation and leak detection
+    // Override connect to wrap clients with validation and leak detection.
+    // Supports both the callback form (used internally by pool.query) and the
+    // promise form (used by getClient). The callback form must invoke the
+    // supplied callback, otherwise node-postgres Pool.query() hangs forever.
     const originalConnect = pool.connect.bind(pool);
-    pool.connect = async function() {
-        const client = await originalConnect();
-        return wrapClient(client, pool, logger, validateConnections);
-    };
+    pool.connect = (function(
+        callback?: (err: Error | undefined, client: PoolClient | undefined, done: (release?: any) => void) => void,
+    ): Promise<PoolClient> | void {
+        if (callback) {
+            originalConnect((err, client, release) => {
+                if (err) {
+                    callback(err, client, release);
+                    return;
+                }
+                if (!client) {
+                    callback(new Error("connect returned no client"), undefined, release);
+                    return;
+                }
+                const wrapped = wrapClient(client, pool, logger, validateConnections);
+                callback(undefined, wrapped, () => wrapped.release());
+            });
+            return;
+        }
+        return originalConnect().then((client) =>
+            wrapClient(client, pool, logger, validateConnections),
+        );
+    }) as Pool["connect"];
 
     const idleTimeout = mergedConfig.idleTransactionTimeout;
     if (idleTimeout?.enabled) {

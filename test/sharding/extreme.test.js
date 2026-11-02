@@ -1028,6 +1028,7 @@ describe("EXTREME: database integration errors", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "s0",
                 strategy: "directory",
                 shards: [makeShardConfig("s0")],
                 routing: { directory: { "a": "s0" } },
@@ -1043,6 +1044,7 @@ describe("EXTREME: database integration errors", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "s0",
                 strategy: "directory",
                 shards: [makeShardConfig("s0")],
                 routing: { directory: { "a": "s0" } },
@@ -1097,6 +1099,7 @@ describe("EXTREME: concurrent routing", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "s0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("s0", "postgresql://localhost:5432/s0"),
@@ -1123,6 +1126,7 @@ describe("EXTREME: concurrent routing", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "s0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("s0", "postgresql://localhost:5432/s0"),
@@ -1154,6 +1158,7 @@ describe("EXTREME: concurrent routing", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "s0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("s0", "postgresql://localhost:5432/s0"),
@@ -1195,6 +1200,7 @@ describe("EXTREME: shutdown", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "s0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("s0"),
@@ -1215,6 +1221,7 @@ describe("EXTREME: shutdown", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "s0",
                 strategy: "hash",
                 shards: [makeShardConfig("s0")],
             },
@@ -1246,6 +1253,7 @@ describe("EXTREME: shutdown", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "s0",
                 strategy: "hash",
                 shards: [makeShardConfig("s0")],
             },

@@ -3,7 +3,36 @@
 ## [Unreleased]
 
 ### 🚀 Features
-- Placeholder for upcoming changes
+
+- Default sharding strategy changed from `"hash"` to `"consistent-hash"` (minimizes key remapping when shards are added/removed)
+
+### 🐛 Bug Fixes
+
+#### P0 — Broken on Live Server
+
+- **`pool.connect` callback incompatibility (P0-1)**: `pool.connect` override now supports both callback form (for internal `Pool.query()` use) and promise form (for `getClient()`). Previously the callback was dropped, causing `pool.query()`, `db.health()`, `db.check()`, and `db.schema.*` DDL helpers to deadlock indefinitely and leak pool slots.
+- **`db.query(sql\`...\`)` drops fragment values (P0-2)**: Query config objects / fragments passed as the first argument now preserve their `values`. The second argument is treated strictly as options, never as a values override.
+- **Optimistic locking breaks `updateById`/`deleteById` (P0-3)**: `updateById` and `deleteById` now fetch the current row via `findById` and inject the current `version` into the WHERE clause, fixing `TypeError: Optimistic locking requires "version" in the WHERE clause`.
+
+#### P1 — Wrong Results / Data Risk
+
+- **`queryAllShards` merge `"application"` returns `{}` (P1-1)**: `fanOutApi` now leaves results unmerged when `merge === "application"`, returning raw per-shard result objects instead of empty objects.
+- **Failed 2PC poisons next query with `25P02` (P1-2)**: Distributed transaction execution context now issues `ROLLBACK` on the participant client when a statement fails, clearing the aborted transaction state before returning the connection to the pool.
+
+#### P2 — Operational
+
+- **Sharded `transaction()` without `shardKey` silently uses default shard (P2-1)**: Now throws `CrossShardTransactionError` when sharding is enabled and no `shardKey` is provided.
+- **Missing `defaultShardId` only warns instead of throwing (P2-2)**: `normalizeShardingConfig` now throws `ShardConfigError` when sharding is enabled but `defaultShardId` is not configured.
+- **Schema auto-sync undefined unless configured (P2-3)**: When sharding is enabled and no explicit `schemaSync` config is provided, schema auto-sync is auto-enabled using the primary pool as the coordination store.
+- **Hardcoded leak timers not `.unref()`'d (P2-6)**: Leak-detection timers now call `.unref()` so they do not prevent Node.js process exit when idle.
+- **Module-level `Set`s retain clients on shutdown (P2-7)**: `clearActiveConnections()` and `clearManualClients()` are called during `combinedShutdown`, clearing `activeConnections` (pool.ts) and `manualClients` (client.ts).
+- **Query retry opt-in (P2-9)**: Default retry is now enabled for transient errors (serialization failures `40001`, deadlocks `40P01`, connection loss) with `retries: 3`, `baseDelay: 50ms`, `maxDelay: 2000ms`. Non-transient errors are never retried.
+
+### 📚 Documentation
+
+- Added `docs/limitation.md` — comprehensive catalog of all package limitations with severity ratings, impact analysis, and mitigation strategies
+- Updated README.md Production Considerations and Known Limitations sections to link to `docs/limitation.md`
+- Updated ARCHITECTURE.md Production Limitations section to link to `docs/limitation.md`
 
 ---
 

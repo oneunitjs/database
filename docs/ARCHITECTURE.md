@@ -361,6 +361,8 @@ const cursor = await db.cursor(query);
 ## Production Limitations and Mitigations
 
 > **IMPORTANT**: This section documents all known production limitations, their root causes, impact, and recommended mitigations. Each limitation is explained with the **What, Why, Where, and How** framework.
+>
+> 📖 **Complete limitation inventory**: See [`limitation.md`](limitation.md) for a comprehensive catalog of all known limitations, their severity, impact, and mitigation strategies.
 
 ---
 

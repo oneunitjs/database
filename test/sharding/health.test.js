@@ -201,6 +201,7 @@ describe("Database sharding health integration", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0"),
@@ -222,6 +223,7 @@ describe("Database sharding health integration", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -239,6 +241,7 @@ describe("Database sharding health integration", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -277,6 +280,7 @@ describe("Database sharding health integration", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
