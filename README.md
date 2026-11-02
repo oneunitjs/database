@@ -2139,10 +2139,47 @@ try {
 ### Configuration
 
 ```javascript
+import {
+    DistributedTransactionCoordinator,
+    RetryPolicy,
+    DistributedTxHookRunner,
+    ParticipantHealthChecker,
+} from "@oneunit/database";
+
 const coordinator = new DistributedTransactionCoordinator({
-  prepareTimeoutMs: 30000,    // Timeout for PREPARE (default: 30s)
-  commitTimeoutMs: 30000,     // Timeout for COMMIT (default: 30s)
-  maxRetries: 3,              // Max retries for prepare/commit
+  coordinationPool: coordinationPool,
+  coordinatorId: "coord-1",
+  timeouts: {
+    prepareTimeoutMs: 30000,    // Timeout for PREPARE (default: 30s)
+    commitTimeoutMs: 30000,     // Timeout for COMMIT (default: 30s)
+    abortTimeoutMs: 30000,      // Timeout for ROLLBACK (default: 30s)
+    globalTimeoutMs: 300000,    // Overall transaction lifetime (default: 300s)
+  },
+  retryPolicy: new RetryPolicy({
+    maxRetries: 3,
+    initialDelayMs: 100,
+    maxDelayMs: 5000,
+    backoffMultiplier: 2,
+    jitter: 0.1,
+  }),
+  hookRunner: new DistributedTxHookRunner(logger),
+  logger,
+});
+
+// Optional participant health checks
+const healthChecker = new ParticipantHealthChecker(
+  new Map([
+    ["shard-a", { shardId: "shard-a", client: poolA }],
+    ["shard-b", { shardId: "shard-b", client: poolB }],
+  ]),
+  logger,
+);
+
+// Optional cleanup diagnostics
+const cleanupManager = new TransactionCleanupManager(coordinationPool, logger, {
+  dryRun: true,           // Don't actually rollback
+  maxAgeMs: 3_600_000,    // Transactions older than 1h are old
+  autoCleanup: false,     // Set true to auto-cleanup on diagnose()
 });
 ```
 
@@ -2192,6 +2229,7 @@ import {
   DistributedTxNotFoundError,
   DistributedTxAlreadyResolvedError,
   MaxPreparedTransactionsError,
+  DistributedTxTimeoutError,
 } from "@oneunit/database";
 
 try {
@@ -2201,10 +2239,115 @@ try {
     console.log("Transaction already resolved");
   } else if (error instanceof MaxPreparedTransactionsError) {
     console.log("Increase PostgreSQL max_prepared_transactions");
+  } else if (error instanceof DistributedTxTimeoutError) {
+    console.log(`Transaction timed out in ${error.phase} phase: ${error.message}`);
   } else if (error instanceof DistributedTransactionError) {
     console.log("Distributed transaction failed:", error.message);
   }
 }
+```
+
+### Lifecycle Hooks
+
+Register hooks at key points in the 2PC lifecycle:
+
+```javascript
+import {
+  DistributedTxHookRunner,
+} from "@oneunit/database";
+
+const hookRunner = new DistributedTxHookRunner(logger);
+
+// Hook fires before prepare begins
+hookRunner.registerHook("beforePrepare", (context) => {
+  console.log(`Preparing ${context.transactionId} with ${context.data.participants.length} participants`);
+});
+
+// Hook fires after successful commit
+hookRunner.registerHook("afterCommit", (context) => {
+  console.log(`Committed ${context.transactionId} in ${context.data.durationMs}ms`);
+});
+
+// Hook fires if prepare fails
+hookRunner.registerHook("prepareFailed", (context) => {
+  console.log(`Prepare failed on ${context.transactionId}: ${context.data.error.message}`);
+});
+
+// Pass hookRunner to coordinator
+const coordinator = new DistributedTransactionCoordinator({
+  coordinationPool,
+  hookRunner,
+  logger,
+});
+```
+
+Available hook types: `beforePrepare`, `afterPrepare`, `prepareFailed`, `beforeCommit`, `afterCommit`, `commitFailed`, `beforeAbort`, `afterAbort`, `abortFailed`, `onParticipantJoin`, `onParticipantLeave`, `onStateChange`, `onTimeout`. Hook errors are caught and logged — they never break the transaction.
+
+### Participant Health Checks
+
+Monitor participant node health before and during transactions:
+
+```javascript
+import { ParticipantHealthChecker } from "@oneunit/database";
+
+const healthChecker = new ParticipantHealthChecker(
+  new Map([
+    ["shard-a", { shardId: "shard-a", client: poolA }],
+    ["shard-b", { shardId: "shard-b", client: poolB }],
+  ]),
+  logger,
+);
+
+// Start periodic health checks (default 10s interval)
+healthChecker.start();
+
+// Check a single participant on demand
+await healthChecker.checkParticipant("shard-a", { shardId: "shard-a", client: poolA });
+
+// Query health status
+const status = healthChecker.getStatus("shard-a");
+// { participantId: "shard-a", shardId: "shard-a", healthy: true, lastCheckTime: Date, ... }
+
+// Get all unhealthy participants
+const unhealthy = healthChecker.getUnhealthyParticipants();
+// ["shard-b"]
+
+healthChecker.stop();
+```
+
+### Cleanup Diagnostics
+
+Detect and clean up orphaned prepared transactions (e.g., from coordinator crashes):
+
+```javascript
+import { TransactionCleanupManager } from "@oneunit/database";
+
+const cleanupManager = new TransactionCleanupManager(coordinationPool, logger, {
+  dryRun: true,           // Don't actually rollback
+  maxAgeMs: 3_600_000,    // Transactions older than 1h are "old"
+  autoCleanup: false,     // Set true to auto-cleanup on diagnose()
+});
+
+// Diagnose prepared transactions
+const result = await cleanupManager.diagnose();
+// {
+//   scanned: 2,
+//   found: 2,
+//   orphaned: 1,
+//   cleanedUp: 0,
+//   failed: 0,
+//   errors: [],
+//   recommendations: ["Found 1 orphaned transactions. Clean up with cleanupOrphanedTransactions()."]
+// }
+
+// Clean up a specific prepared transaction
+await cleanupManager.cleanupTransaction("pg_tx-1_shard-a");
+
+// Clean up all orphaned prepared transactions
+await cleanupManager.cleanupOrphanedTransactions();
+
+// Clean up all old prepared transactions
+await cleanupManager.cleanupOldTransactions();
 ```
 
 ### PostgreSQL Configuration
@@ -2220,6 +2363,7 @@ SHOW max_prepared_transactions;
 ```
 
 All operations are prepared atomically and committed or aborted together. On any failure, `coordinator.abort()` is invoked to roll back all participants.
+
 
 ---
 

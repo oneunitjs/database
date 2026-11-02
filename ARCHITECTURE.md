@@ -649,11 +649,15 @@ Each state is durable and recoverable. Operations are idempotent and can be resu
 
 The distributed transaction layer implements two-phase commit (2PC) for cross-shard atomicity:
 
-- PREPARE TRANSACTION on all participants
-- COMMIT PREPARED on all participants (or ROLLBACK PREPARED on failure)
-- Participant registration and status tracking
-- Crash recovery via durable coordination state
-- Automatic abort on any failure
+- **Two-phase commit** — PREPARE TRANSACTION on all participants, then COMMIT PREPARED (or ROLLBACK PREPARED on failure)
+- **Configurable timeouts** — `prepareTimeoutMs`, `commitTimeoutMs`, `abortTimeoutMs`, `globalTimeoutMs` per phase with per-shard enforcement
+- **Participant registration and status tracking** — durable coordination state per participant
+- **Crash recovery** via durable coordination state
+- **Automatic abort on any failure** — prepare timeout triggers automatic abort with ROLLBACK PREPARED cleanup
+- **Retry policies** — `RetryPolicy` with exponential backoff + jitter, retryable error classification, `execute()`/`wrap()` patterns
+- **Lifecycle hooks** — `DistributedTxHookRunner` with 16 hook types (`beforePrepare`, `afterPrepare`, `prepareFailed`, `beforeCommit`, `afterCommit`, `commitFailed`, `beforeAbort`, `afterAbort`, `abortFailed`, `onParticipantJoin`, `onParticipantLeave`, `onStateChange`, `onTimeout`, ...); error-isolated dispatch
+- **Participant health checks** — `ParticipantHealthChecker` with per-node health status, consecutive failure/success tracking, unhealthy duration
+- **Cleanup diagnostics** — `PreparedTransactionScanner` scans `pg_prepared_xacts`; `TransactionCleanupManager` diagnoses, cleans up orphaned/old transactions (with dry-run support), generates recommendations
 
 **Architecture Pattern:** Multi-shard deployment with 2PC support
 
@@ -676,6 +680,34 @@ The distributed transaction layer implements two-phase commit (2PC) for cross-sh
 - Coordination database for transaction state
 - Network connectivity between all shards and coordinator
 - Monitoring for prepared transaction state
+
+**Usage Example:**
+```typescript
+import {
+    DistributedTransactionCoordinator,
+    RetryPolicy,
+    DistributedTxHookRunner,
+    ParticipantHealthChecker,
+    PreparedTransactionScanner,
+    TransactionCleanupManager,
+} from "@oneunit/database";
+
+const coordinator = new DistributedTransactionCoordinator({
+    coordinationPool,
+    timeouts: { prepareTimeoutMs: 30_000, commitTimeoutMs: 30_000, abortTimeoutMs: 30_000, globalTimeoutMs: 300_000 },
+    retryPolicy: new RetryPolicy({ maxRetries: 3, initialDelayMs: 100, maxDelayMs: 5_000 }),
+    hookRunner: new DistributedTxHookRunner(logger),
+    logger,
+});
+await coordinator.initialize();
+
+const txId = await coordinator.begin();
+await coordinator.addParticipant(txId, "shard-1", pool1);
+await coordinator.addParticipant(txId, "shard-2", pool2);
+await coordinator.prepare(txId);
+await coordinator.commit(txId);
+```
+
 
 **Performance Considerations:**
 - 2PC adds latency (two round-trips instead of one)
@@ -1037,9 +1069,19 @@ Each factory receives only the dependencies it needs (pool, query function, logg
 
 | File | Factory / Class | Produces | Key Dependencies |
 | :--- | :--- | :--- | :--- |
-| `distributed-transaction-coordinator.ts` | `DistributedTransactionCoordinator` | 2PC lifecycle | coordination pool |
+| `distributed-transaction-coordinator.ts` | `DistributedTransactionCoordinator` | 2PC lifecycle | coordination pool, timeouts, retry policy, hook runner |
 | `distributed-transaction-context.ts` | `DistributedTransactionContext` | per-shard execution | shard pools |
 | `coordinator-schema.ts` | schema | coordination tables | — |
+| `distributed-tx-hooks.ts` | `DistributedTxHookRunner` | lifecycle hook dispatch | logger |
+| `distributed-tx-hooks.ts` | `DistributedTxHookType` / `DistributedTxHookContext` / `DistributedTxHookData` / `DistributedTxHook` / `DistributedTxCoordinatorHookAPI` / `DistributedTxHooks` / `DistributedTxLogger` | hook types | — |
+| `participant-health.ts` | `ParticipantHealthChecker` | per-node health checks | pool clients, logger |
+| `participant-health.ts` | `ParticipantHealthStatus` / `ParticipantHealthOptions` / `ParticipantHealthLogger` | health types | — |
+| `prepared-transaction-scanner.ts` | `PreparedTransactionScanner` | pg_prepared_xacts scanner | pg.Pool, logger |
+| `prepared-transaction-scanner.ts` | `PreparedTransactionInfo` / `PreparedTransactionFilter` / `PreparedTransactionScannerOptions` / `PreparedTransactionScannerLogger` | scanner types | — |
+| `cleanup-diagnostics.ts` | `TransactionCleanupManager` | orphaned/old transaction cleanup | pg.Pool, logger, scanner |
+| `cleanup-diagnostics.ts` | `CleanupResult` / `CleanupDiagnosticsOptions` / `CleanupDiagnosticsLogger` | cleanup types | — |
+| `retry-policy.ts` | `RetryPolicy` | retry with exponential backoff + jitter | — |
+| `retry-policy.ts` | `RetryPolicyOptions` / `defaultIsRetryable` | retry types | — |
 
 ### failover/
 

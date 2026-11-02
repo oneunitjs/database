@@ -25,6 +25,13 @@
 - **Distributed Transactions:** Added comprehensive 2PC support with `DistributedTransactionCoordinator` and `DistributedTransactionContext`
 - **Distributed Transactions:** Added `DistributedTransactionError`, `DistributedTxNotFoundError`, `DistributedTxAlreadyResolvedError`, `MaxPreparedTransactionsError` error types
 - **Distributed Transactions:** Added type exports: `ParticipantContext`, `DistributedTxCoordinatorOptions`, `DistributedTransactionExecuteOptions`
+- **Distributed Transactions:** Added configurable timeouts (`prepareTimeoutMs`, `commitTimeoutMs`, `abortTimeoutMs`, `globalTimeoutMs`) via `DistributedTxTimeoutConfig` with `DEFAULT_DISTRIBUTED_TX_TIMEOUTS`
+- **Distributed Transactions:** Added `DistributedTxTimeoutError` with phase, shardId, timeoutMs metadata; automatic abort on prepare timeout
+- **Distributed Transactions:** Added `RetryPolicy` with exponential backoff + jitter, retryable error classification, `execute()` and `wrap()` patterns
+- **Distributed Transactions:** Added `DistributedTxHookRunner` with 16 lifecycle hook types (before/after prepare/commit/abort, prepareFailed/commitFailed/abortFailed, onParticipantJoin/Leave, onStateChange, onTimeout)
+- **Distributed Transactions:** Added `ParticipantHealthChecker` with per-node health status, consecutive failure/success tracking, health check execution
+- **Distributed Transactions:** Added `PreparedTransactionScanner` for scanning pg_prepared_xacts and `TransactionCleanupManager` for diagnosing/cleaning up orphaned/old transactions
+- **Distributed Transactions:** Exported new types: `DistributedTxTimeoutConfig`, `RetryPolicyOptions`, `DistributedTxHookType`, `DistributedTxHookContext`, `DistributedTxHookData`, `DistributedTxHook`, `DistributedTxCoordinatorHookAPI`, `DistributedTxHooks`, `DistributedTxLogger`, `ParticipantHealthStatus`, `ParticipantHealthOptions`, `ParticipantHealthLogger`, `PreparedTransactionInfo`, `PreparedTransactionFilter`, `PreparedTransactionScannerOptions`, `PreparedTransactionScannerLogger`, `CleanupResult`, `CleanupDiagnosticsOptions`, `CleanupDiagnosticsLogger`
 - **QueryBuilder:** Added comprehensive enhancements including CTE (WITH clause) support via `with()` and `withRecursive()`
 - **QueryBuilder:** Added Window Function support via `window()` method and helper functions `sql.rowNumber()`, `sql.rank()`, `sql.denseRank()`
 - **QueryBuilder:** Added Complex Join support (RIGHT JOIN, FULL OUTER JOIN, CROSS JOIN, LEFT OUTER JOIN, RIGHT OUTER JOIN)
