@@ -67,10 +67,7 @@ export function createCursor(pool: Pool, resolvePool?: PoolResolver): CursorApi 
         let released = false;
         let closed = false;
 
-        // Track cursor creation time for leak detection
-        const createdAt = Date.now();
         const CURSOR_TIMEOUT = 300000; // 5 minutes
-
         // Configurable batch size for read/iterate operations
         const defaultBatchSize = (options.batchSize as number | undefined) ?? 100;
 

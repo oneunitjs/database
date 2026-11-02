@@ -529,8 +529,6 @@ export function createMigrator(
             }
         }
     };
-    const initPromise = Promise.resolve();
-    void initPromise.catch(() => {});
 
     // Cache database names per pool (pool.database is not exposed by pg)
     const poolDatabaseCache = new Map<Pool, string>();
@@ -3292,9 +3290,6 @@ export function createMigrator(
                         skipped.push(m.id!);
                         continue;
                     }
-                    if (propertiesEqual(record.checksum, checksum(m.source ?? ""))) {
-                        // already baseline-tracked maybe skip
-                    }
                     appliedCount++;
                 }
 
@@ -3755,10 +3750,6 @@ export function createMigrator(
         } finally {
             client.release();
         }
-    }
-
-    function propertiesEqual(a: unknown, b: unknown): boolean {
-        return a === b;
     }
 
     const defaultSource = source ?? migrations ?? directory;

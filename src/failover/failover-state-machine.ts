@@ -1,4 +1,4 @@
-import type { FailoverState, FailoverEvent, ShardFailoverState, FailoverConfig } from "./failover-types.js";
+import type { FailoverState, FailoverEvent, ShardFailoverState } from "./failover-types.js";
 
 const STATE_TRANSITIONS: Record<FailoverState, FailoverState[]> = {
     healthy: ["suspect"],

@@ -1094,11 +1094,6 @@ export class QueryBuilder implements QueryBuilderType {
         return `WITH ${parts.join(", ")} `;
     }
 
-    private _compileWindowDefinitions(): string {
-        // Window definitions are referenced in SELECT, not declared separately
-        return "";
-    }
-
     private _compileSelectList(): string {
         const columns = this._selects.length ? this._selects : ["*"];
         

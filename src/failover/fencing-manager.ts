@@ -1,25 +1,11 @@
-import type { Pool } from "pg";
 import type {
     FencingProvider,
     FencingOptions,
     FencingActivationResult,
     FencingStatus,
 } from "./fencing.js";
+import type { RequiredFailoverLogger } from "./failover-types.js";
 
-/**
- * Logger type compatible with FailoverManager's RequiredFailoverLogger.
- */
-export type RequiredFailoverLogger = {
-    debug(payload: unknown, message?: string): void;
-    info(payload: unknown, message?: string): void;
-    warn(payload: unknown, message?: string): void;
-    error(payload: unknown, message?: string): void;
-};
-
-/**
- * Manages multiple fencing providers and can activate/deactivate fencing
- * across all of them simultaneously.
- */
 export class FencingManager {
     private readonly providers = new Map<string, FencingProvider>();
 

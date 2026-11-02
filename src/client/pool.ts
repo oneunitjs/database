@@ -118,7 +118,7 @@ export function createPool({
         );
     }
 
-    pool.on("connect", (client) => {
+    pool.on("connect", () => {
         logger?.info?.(
             {
                 database: mergedConfig.database,
@@ -143,7 +143,7 @@ export function createPool({
         );
     });
 
-    pool.on("remove", (client) => {
+    pool.on("remove", () => {
         logger?.debug?.(
             { 
                 totalCount: pool.totalCount, 

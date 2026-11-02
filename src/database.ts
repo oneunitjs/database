@@ -247,29 +247,6 @@ interface HashShardingConfig {
  * to the shard matching the key.
  * Throws ShardRoutingError if the target shard is draining (distributed state).
  */
-function resolvePoolForShardKey(
-    shardKey: string | undefined,
-    router: ShardRouter | undefined,
-    fallbackPool: Pool,
-    _logger?: Logger,
-): { pool: Pool; shardId?: string } {
-    if (!router || !shardKey) {
-        return { pool: fallbackPool };
-    }
-
-    try {
-        const { id, pool } = router.resolveShard(shardKey);
-        return { pool, shardId: id };
-    } catch (error) {
-        if (error instanceof ShardNotFoundError || error instanceof ShardingDisabledError) {
-            throw new ShardRoutingError(
-                `Unable to route to a shard for key "${shardKey}": ${error.message}`,
-            );
-        }
-        throw error;
-    }
-}
-
 function buildShardingApi(
     manager: ShardManager | undefined,
     router: ShardRouter | undefined,
@@ -636,7 +613,6 @@ function buildShardingApi(
         const results: T[] = [];
         const successfulShards: string[] = [];
         const failedShards: Array<{ shardId: string; error: string }> = [];
-        let partial = false;
 
         // Semaphore for concurrency limiting.
         const semaphore = new Array(Math.min(concurrency, targetShardIds.length)).fill(null);
@@ -645,7 +621,7 @@ function buildShardingApi(
             const shard = mgr!.getShard(shardId);
             if (!shard || !shard.pool) {
                 failedShards.push({ shardId, error: `Shard "${shardId}" not found or pool unavailable` });
-                partial = true;
+                
                 return;
             }
 
@@ -664,7 +640,7 @@ function buildShardingApi(
                     await exec!.releaseShard(shardId);
                 }
             } catch (error) {
-                partial = true;
+                
                 if (onShardError === "stop") {
                     throw error;
                 }

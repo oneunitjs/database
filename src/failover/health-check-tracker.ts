@@ -1,4 +1,4 @@
-import type { FailoverConfig } from "./failover-types.js";
+import type { RequiredFailoverLogger } from "./failover-types.js";
 
 /**
  * Health status of a single node, tracked by the HealthCheckTracker.
@@ -24,16 +24,6 @@ export interface NodeFailureThresholds {
     healthCheckIntervalMs?: number;
     unhealthyHealthCheckMultiplier?: number;
 }
-
-/**
- * Logger type compatible with FailoverManager's RequiredFailoverLogger.
- */
-export type RequiredFailoverLogger = {
-    debug(payload: unknown, message?: string): void;
-    info(payload: unknown, message?: string): void;
-    warn(payload: unknown, message?: string): void;
-    error(payload: unknown, message?: string): void;
-};
 
 /**
  * Tracks per-node health check results and determines when failover should

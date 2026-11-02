@@ -2,18 +2,6 @@ import type { Pool } from "pg";
 import type { CheckApi } from "../types.js";
 import { performance } from "node:perf_hooks";
 
-function poolStats(pool: Pool | undefined): { total: number; idle: number; waiting: number } | undefined {
-    if (typeof pool?.totalCount !== "number") {
-        return undefined;
-    }
-
-    return {
-        total: pool.totalCount,
-        idle: pool.idleCount,
-        waiting: pool.waitingCount,
-    };
-}
-
 function extendedPoolStats(pool: Pool | undefined): { 
     total: number; 
     idle: number; 

@@ -1,4 +1,5 @@
 import { Pool, type PoolConfig } from "pg";
+import type { RequiredFailoverLogger } from "./failover-types.js";
 
 /**
  * Result of a pool reconnection attempt.
@@ -35,16 +36,6 @@ export const DEFAULT_RECONNECTION_OPTIONS: Required<ReconnectionOptions> = {
     retryDelayMs: 1_000,
     maxRetryDelayMs: 30_000,
     validatePool: true,
-};
-
-/**
- * Logger type compatible with FailoverManager's RequiredFailoverLogger.
- */
-export type RequiredFailoverLogger = {
-    debug(payload: unknown, message?: string): void;
-    info(payload: unknown, message?: string): void;
-    warn(payload: unknown, message?: string): void;
-    error(payload: unknown, message?: string): void;
 };
 
 /**

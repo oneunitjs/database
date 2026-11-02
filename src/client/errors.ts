@@ -1,4 +1,3 @@
-import type { NormalizedError } from "../types.js";
 
 const TRANSIENT_ERROR_CODES = new Set([
     // Class 08 - Connection Exception

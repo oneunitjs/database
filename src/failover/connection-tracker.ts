@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import type { RequiredFailoverLogger } from "./failover-types.js";
 
 /**
  * A connection currently tracked by the connection tracker.
@@ -48,16 +49,6 @@ export const DEFAULT_CONNECTION_TRACKER_OPTIONS: Required<ConnectionTrackerOptio
         warn: () => {},
         error: () => {},
     },
-};
-
-/**
- * Logger type compatible with FailoverManager's RequiredFailoverLogger.
- */
-export type RequiredFailoverLogger = {
-    debug(payload: unknown, message?: string): void;
-    info(payload: unknown, message?: string): void;
-    warn(payload: unknown, message?: string): void;
-    error(payload: unknown, message?: string): void;
 };
 
 /**

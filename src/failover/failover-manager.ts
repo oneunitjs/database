@@ -3,38 +3,32 @@ import type {
     FailoverConfig,
     HaProvider,
     HaNodeInfo,
-    HaNodeStatus,
     HaTopology,
     FailoverState,
     ShardFailoverState,
-    FailoverEvent,
+    RequiredFailoverLogger,
 } from "./failover-types.js";
 import type {
     FailoverStateStore,
-    FailoverContext,
 } from "./failover-state-store.js";
 import type { FailoverRecoveryOptions } from "./failover-recovery.js";
 import { FailoverRecoveryManager } from "./failover-recovery.js";
 import { ConnectionTracker } from "./connection-tracker.js";
 import type { ConnectionInvalidationResult } from "./connection-tracker.js";
 import { HealthCheckClassifier } from "./health-classifier.js";
-import { FailoverHookRunner } from "./failover-hooks.js";
+import { FailoverHookRunner, defaultHookLogger } from "./failover-hooks.js";
 import type { FailoverManagerHookAPI } from "./failover-hooks.js";
 import { HealthCheckTracker } from "./health-check-tracker.js";
 import { PoolReconnector } from "./pool-reconnector.js";
 import { FencingManager } from "./fencing-manager.js";
 import type {
     FailoverEventStore,
-    FailoverEvent as PlanFailoverEvent,
-    FailoverEventType,
 } from "./failover-event-store.js";
 import {
     createInitialFailoverState,
     applyFailoverTransition,
     createFailoverEvent,
     nextFailoverState,
-    isTransientFailoverState,
-    isTerminalFailoverState,
 } from "./failover-state-machine.js";
 
 export interface FailoverManagerOptions {
@@ -53,13 +47,6 @@ export interface FailoverManagerOptions {
     poolReconnector?: PoolReconnector;
     fencingManager?: FencingManager;
 }
-
-export type RequiredFailoverLogger = {
-    debug(payload: unknown, message?: string): void;
-    info(payload: unknown, message?: string): void;
-    warn(payload: unknown, message?: string): void;
-    error(payload: unknown, message?: string): void;
-};
 
 export class FailoverManager {
     private readonly shardId: string;
@@ -88,12 +75,7 @@ export class FailoverManager {
         this.shardId = options.shardId;
         this.primaryPool = options.primaryPool;
         this.config = options.config;
-        this.logger = options.logger ?? {
-            debug: () => {},
-            info: () => {},
-            warn: () => {},
-            error: () => {},
-        };
+        this.logger = options.logger ?? defaultHookLogger;
         this.onStateChange = options.onStateChange;
         this.onFailoverComplete = options.onFailoverComplete;
         this.stateStore = options.stateStore;
@@ -253,7 +235,6 @@ export class FailoverManager {
 
         // Check primary health using a simple query
         let primaryUp = false;
-        let checkLatency = 0;
         const start = Date.now();
 
         // Check if the node is fenced before performing the health check.
@@ -271,13 +252,10 @@ export class FailoverManager {
 
         try {
             await this.primaryPool.query("SELECT 1");
-            checkLatency = Date.now() - start;
             primaryUp = true;
-            const nodeId = this.state.currentPrimary ?? "unknown";
             this.healthTracker?.recordSuccess(nodeId);
         } catch (error) {
             primaryUp = false;
-            const nodeId = this.state.currentPrimary ?? "unknown";
             this.healthTracker?.recordFailure(nodeId);
             const err = error instanceof Error ? error : new Error(String(error));
             const classification = this.classifier.classify({
@@ -367,19 +345,12 @@ export class FailoverManager {
         triggeredBy: string,
     ): Promise<void> {
         const next = nextFailoverState(this.state.state, reason as any);
-        if (next === null || next !== toState) {
-            // Validate via the state machine
-            const validNext = nextFailoverState(
-                this.state.state,
-                reason as "failure_detected" | "recovery_detected" | "failover_requested" | "promotion_started" | "promotion_verified" | "promotion_failed" | "primary_returned" | "operator_intervention",
+        if (next === null) {
+            this.logger.warn(
+                { shardId: this.shardId, from: this.state.state, to: toState },
+                "Invalid failover transition, refusing",
             );
-            if (validNext === null) {
-                this.logger.warn(
-                    { shardId: this.shardId, from: this.state.state, to: toState },
-                    "Invalid failover transition, refusing",
-                );
-                return;
-            }
+            return;
         }
 
         const event = createFailoverEvent(
@@ -600,7 +571,7 @@ export class FailoverManager {
                 ),
             ]);
 
-            const previousPrimary = this.state.currentPrimary;
+            // Update state with new primary
             this.state = {
                 ...this.state,
                 currentPrimary: promoted.id,
@@ -610,7 +581,7 @@ export class FailoverManager {
             await this.hookRunner.invoke("afterPromotion", {
                 shardId: this.shardId,
                 manager: this.hookAPI,
-                data: { newPrimary: promoted, previousPrimary: undefined },
+                data: { newPrimary: promoted as HaNodeInfo, previousPrimary: undefined },
             });
 
             // Reconnect pools after successful promotion.

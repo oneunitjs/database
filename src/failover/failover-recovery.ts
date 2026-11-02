@@ -1,7 +1,7 @@
-import type { Pool } from "pg";
 import type {
     FailoverState,
     ShardFailoverState,
+    RequiredFailoverLogger,
 } from "./failover-types.js";
 import type {
     FailoverStateStore,
@@ -261,14 +261,3 @@ export class FailoverRecoveryManager {
         return changed ? (reconciled as ShardFailoverState) : null;
     }
 }
-
-/**
- * Logger type compatible with FailoverManager's RequiredFailoverLogger.
- * Defined inline here to avoid a circular import.
- */
-export type RequiredFailoverLogger = {
-    debug(payload: unknown, message?: string): void;
-    info(payload: unknown, message?: string): void;
-    warn(payload: unknown, message?: string): void;
-    error(payload: unknown, message?: string): void;
-};

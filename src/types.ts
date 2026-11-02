@@ -1,5 +1,4 @@
 import type { Pool, PoolClient, QueryResult, QueryResultRow, PoolConfig, QueryConfig } from "pg";
-import type { Readable } from "node:stream";
 import type { DatabaseError, TimeoutError } from "./client/errors.js";
 
 export type { DatabaseError, TimeoutError };

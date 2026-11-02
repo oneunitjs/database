@@ -1,4 +1,9 @@
-import type { FailoverState, ShardFailoverState, HaNodeInfo } from "./failover-types.js";
+import type {
+    FailoverState,
+    ShardFailoverState,
+    HaNodeInfo,
+    RequiredFailoverLogger,
+} from "./failover-types.js";
 
 /**
  * Types of failover hooks that can be registered.
@@ -80,20 +85,6 @@ export type FailoverHooks = {
     [K in FailoverHookType]?: FailoverHook<K>[];
 };
 
-/**
- * Logger type compatible with FailoverManager's RequiredFailoverLogger.
- */
-export type RequiredFailoverLogger = {
-    debug(payload: unknown, message?: string): void;
-    info(payload: unknown, message?: string): void;
-    warn(payload: unknown, message?: string): void;
-    error(payload: unknown, message?: string): void;
-};
-
-/**
- * Registers and invokes failover hooks. Hook errors are caught and logged
- * so a failing hook never breaks failover operations.
- */
 export class FailoverHookRunner {
     private hooks: FailoverHooks = {};
 

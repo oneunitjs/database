@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import type { RequiredFailoverLogger } from "./failover-types.js";
 
 /**
  * Status of a fenced node.
@@ -94,16 +95,6 @@ CREATE TABLE IF NOT EXISTS _database_fencing_history (
     performed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `;
-
-/**
- * Logger type compatible with FailoverManager's RequiredFailoverLogger.
- */
-export type RequiredFailoverLogger = {
-    debug(payload: unknown, message?: string): void;
-    info(payload: unknown, message?: string): void;
-    warn(payload: unknown, message?: string): void;
-    error(payload: unknown, message?: string): void;
-};
 
 /**
  * Fencing provider backed by PostgreSQL advisory locks. Uses pg_advisory_lock

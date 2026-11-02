@@ -11,7 +11,7 @@ import type {
     BatchRowError,
     RetryOptions,
 } from "../types.js";
-import { quoteIdent, quoteIdentList, isFragment, sql, raw } from "../query/sql.js";
+import { quoteIdent, quoteIdentList } from "../query/sql.js";
 import { QueryBuilder } from "../query/builder.js";
 
 const DEFAULT_CHUNK_SIZE = 500;
@@ -108,7 +108,7 @@ function checkAborted(signal: AbortSignal | undefined): void {
     }
 }
 
-function makeStats(startTime: number): BatchStats {
+function makeStats(): BatchStats {
     return {
         chunks: 0,
         rowsProcessed: 0,
@@ -177,12 +177,9 @@ export function createBatch({
     async function runWithRetry<T>(
         fn: () => Promise<T>,
         retry: { maxRetries: number; baseDelayMs: number; maxDelayMs: number },
-        signal: AbortSignal | undefined,
-        context: string,
     ): Promise<T> {
         let lastError: unknown;
         for (let attempt = 0; attempt <= retry.maxRetries; attempt++) {
-            checkAborted(signal);
             try {
                 return await fn();
             } catch (error) {
@@ -190,7 +187,6 @@ export function createBatch({
                 if (attempt >= retry.maxRetries) {
                     break;
                 }
-                checkAborted(signal);
                 const delay = Math.min(
                     retry.baseDelayMs * Math.pow(2, attempt),
                     retry.maxDelayMs,
@@ -207,7 +203,7 @@ export function createBatch({
         options: InsertManyOptions = {},
     ): Promise<BatchInsertResult> {
         const startTime = Date.now();
-        const stats: BatchStats = makeStats(startTime);
+        const stats: BatchStats = makeStats();
         const errors: BatchRowError[] = [];
 
         if (!Array.isArray(rows) || rows.length === 0) {
@@ -234,8 +230,6 @@ export function createBatch({
 
         const columnList = quoteIdentList(columns);
         const collected: unknown[] = [];
-        let rowsSucceeded = 0;
-        let rowsFailed = 0;
 
         const executeChunk = async (
             chunk: Record<string, unknown>[],
@@ -268,9 +262,7 @@ export function createBatch({
             const result = await runWithRetry(
                 () => runChunk(text, params, chunkOptions),
                 resolveRetry(options.retry),
-                options.signal,
-                "insert",
-            );
+                            );
 
             if (returning) {
                 collected.push(...(result?.rows ?? []));
@@ -365,7 +357,7 @@ export function createBatch({
         } = {},
     ): Promise<BatchSelectResult> {
         const startTime = Date.now();
-        const stats: BatchStats = makeStats(startTime);
+        const stats: BatchStats = makeStats();
 
         let sqlText: string;
         let params: unknown[] = [];
@@ -412,9 +404,7 @@ export function createBatch({
                     return query(paginatedText, chunkParams, mergedOptions);
                 },
                 retry,
-                options.signal,
-                "select",
-            );
+                            );
 
             chunkRows = result.rows ?? [];
             stats.chunks++;
@@ -502,7 +492,7 @@ export function createBatch({
         } = {},
     ): Promise<BatchUpdateDeleteResult> {
         const startTime = Date.now();
-        const stats: BatchStats = makeStats(startTime);
+        const stats: BatchStats = makeStats();
         const errors: BatchRowError[] = [];
 
         const columns = Object.keys(values);
@@ -556,9 +546,7 @@ export function createBatch({
                     return query(text, params, mergedOptions);
                 },
                 retry,
-                options.signal,
-                "update",
-            );
+                            );
 
             if (returning) {
                 collected.push(...(result.rows ?? []));
@@ -608,9 +596,7 @@ export function createBatch({
             const result = await runWithRetry(
                 () => client.query(text, params),
                 retry,
-                options.signal,
-                "update",
-            );
+                            );
 
             if (returning) {
                 collected.push(...(result.rows ?? []));
@@ -722,7 +708,7 @@ export function createBatch({
         } = {},
     ): Promise<BatchUpdateDeleteResult> {
         const startTime = Date.now();
-        const stats: BatchStats = makeStats(startTime);
+        const stats: BatchStats = makeStats();
         const errors: BatchRowError[] = [];
 
         const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
@@ -765,9 +751,7 @@ export function createBatch({
                     return query(text, params, mergedOptions);
                 },
                 retry,
-                options.signal,
-                "delete",
-            );
+                            );
 
             if (returning) {
                 collected.push(...(result.rows ?? []));
@@ -814,9 +798,7 @@ export function createBatch({
             const result = await runWithRetry(
                 () => client.query(text, params),
                 retry,
-                options.signal,
-                "delete",
-            );
+                            );
 
             if (returning) {
                 collected.push(...(result.rows ?? []));
@@ -939,9 +921,7 @@ export function createBatch({
                             return runWithRetry(
                                 () => client.query(text, values),
                                 retry,
-                                options.signal,
-                                "executeBatch",
-                            );
+                                                            );
                         })
                     );
 
@@ -971,9 +951,7 @@ export function createBatch({
                         return runWithRetry(
                             () => query(text, values, mergedOptions),
                             retry,
-                            options.signal,
-                            "executeBatch",
-                        );
+                                                    );
                     })
                 );
 

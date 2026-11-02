@@ -94,6 +94,17 @@ export interface HaProvider {
     shutdown(): Promise<void>;
 }
 
+/**
+ * Logger shape used across the failover layer. Defined once here and imported
+ * by every failover module instead of being redefined locally.
+ */
+export type RequiredFailoverLogger = {
+    debug(payload: unknown, message?: string): void;
+    info(payload: unknown, message?: string): void;
+    warn(payload: unknown, message?: string): void;
+    error(payload: unknown, message?: string): void;
+};
+
 // ---------------------------------------------------------------------------
 // Distributed Transaction — Coordinator Types
 // ---------------------------------------------------------------------------
