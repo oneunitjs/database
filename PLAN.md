@@ -21,26 +21,53 @@ This document outlines the implementation plan to address all missing features r
 ### 🔴 1.1 Failover Layer Foundation (Weeks 1-4)
 **Why:** Without failover, the package cannot achieve high availability.
 
-#### 1.1.1 Persistent Failover State Storage
+#### 1.1.1 Persistent Failover State Storage ✅ DONE
 - **Effort:** 3-5 days | **File:** `src/failover/failover-state-store.ts`
-- **Approach:** Create interface + PostgreSQL implementation
-- **Schema:** `_database_failover_state` and `_database_failover_events` tables
-- **Acceptance:** State persists across restarts, atomic updates
+- **Approach:** Created `FailoverStateStore` interface + `PgFailoverStateStore` (PostgreSQL) + `MemoryFailoverStateStore` (testing)
+- **Schema:** `_database_ha_state`, `_database_ha_state_versions`, `_database_ha_locks`
+- **Acceptance:** State persists across restarts, atomic updates with optimistic concurrency
 
-#### 1.1.2 State Recovery After Restart
-- **Effort:** 3-5 days | **File:** `src/failover/failover-manager.ts`
-- **Approach:** Load state on initialization, version-based concurrency
+#### 1.1.2 State Recovery After Restart ✅ DONE
+- **Effort:** 3-5 days | **File:** `src/failover/failover-recovery.ts`
+- **Approach:** `FailoverRecoveryManager` loads state on initialization, version-based concurrency, locking, reconciliation
 - **Acceptance:** Multiple instances coordinate via shared store
 
-#### 1.1.3 Connection Invalidation
+#### 1.1.3 Connection Invalidation ✅ DONE
 - **Effort:** 3-5 days | **File:** `src/failover/connection-tracker.ts`
-- **Approach:** Track connections per shard, invalidate on failover
+- **Approach:** `ConnectionTracker` tracks connections per shard, invalidates on failover, respects active transactions
 - **Acceptance:** No connection leaks, graceful cleanup
 
-#### 1.1.4 Health-Check Failure Classification
+#### 1.1.4 Health-Check Failure Classification ✅ DONE
 - **Effort:** 2-3 days | **File:** `src/failover/health-classifier.ts`
-- **Approach:** Classify errors (connection-refused, timeout, auth, etc.)
-- **Acceptance:** All error types properly classified
+- **Approach:** `HealthCheckClassifier` classifies errors (connection-refused, timeout, auth, server error, etc.)
+- **Acceptance:** All error types properly classified with severity, retryable, failoverImmediately flags
+
+#### 1.1.5 Failover Event History ✅ DONE
+- **Effort:** 3-4 days | **File:** `src/failover/failover-event-store.ts`
+- **Approach:** `FailoverEventStore` interface + `PgFailoverEventStore` + `MemoryFailoverEventStore`
+- **Schema:** `_database_ha_events` with query, cleanup, statistics
+- **Acceptance:** Queryable events, automatic cleanup, statistics aggregation
+
+#### 1.1.6 Configurable Failure Detection Thresholds ✅ DONE
+- **Effort:** 2-3 days | **File:** `src/failover/health-check-tracker.ts`
+- **Approach:** `HealthCheckTracker` with per-node consecutive failure/success thresholds, unhealthy duration, dynamic intervals
+- **Acceptance:** Configurable per node, proper state transitions, integration with FailoverManager
+
+#### 1.1.7 Failover Hooks & Callbacks ✅ DONE
+- **Effort:** 3-4 days | **File:** `src/failover/failover-hooks.ts`
+- **Approach:** `FailoverHookRunner` for before/after state change, failover, promotion, health check
+- **Acceptance:** All events trigger hooks, errors don't break failover
+
+#### 1.1.8 Pool Reconnection ✅ DONE
+- **Effort:** 3-4 days | **File:** `src/failover/pool-reconnector.ts`
+- **Approach:** `PoolReconnector` with exponential backoff retry, atomic pool swap
+- **Acceptance:** Primary and replica pool reconnection, status tracking
+
+#### 1.1.9 Fencing Integration ✅ DONE
+- **Effort:** 5-7 days | **File:** `src/failover/fencing.ts`, `src/failover/fencing-manager.ts`
+- **Approach:** `FencingProvider` interface, `AdvisoryLockFencingProvider`, `FencingManager`
+- **Schema:** `_database_fencing_locks`, `_database_fencing_history`
+- **Acceptance:** Prevents writes during failover, token-based validation, multi-provider support
 
 ---
 
@@ -66,10 +93,12 @@ This document outlines the implementation plan to address all missing features r
 - **Documentation** updates
 
 **Acceptance Criteria for Phase 1:**
-- [ ] Failover layer functional with persistent state
+- [x] Failover layer functional with persistent state (all 9 features implemented)
 - [ ] Distributed transactions have proper timeout/retry handling
 - [ ] Package maintains HA during primary failures
 - [ ] 100% test coverage for new features
+
+**Remaining Phase 1 work:** Distributed Transaction Timeout Configuration (1.2.1) and Retry Policies (1.2.2).
 
 ---
 
@@ -106,34 +135,31 @@ This document outlines the implementation plan to address all missing features r
 
 ---
 
-### 🟡 2.2 Failover Layer Completion (Weeks 11-12)
+### 🟡 2.2 Failover Layer Completion ✅ DONE (implemented in Phase 1)
 
-#### 2.2.1 Failover Event History
-- **Effort:** 3-4 days
-- **File:** `src/failover/failover-state-store.ts`
+All failover completion features were implemented ahead of schedule in Phase 1:
+
+#### 2.2.1 Failover Event History ✅ DONE
+- **File:** `src/failover/failover-event-store.ts`
 - **Approach:** Persist all state changes with timestamps
 - **Acceptance:** Queryable events, automatic cleanup
 
-#### 2.2.2 Configurable Failure Detection Thresholds
-- **Effort:** 3-4 days
-- **File:** `src/failover/failover-config.ts`
+#### 2.2.2 Configurable Failure Detection Thresholds ✅ DONE
+- **File:** `src/failover/health-check-tracker.ts`
 - **Approach:** Per-node thresholds for consecutive failures, unhealthy duration
 - **Acceptance:** Configurable per node, proper state transitions
 
-#### 2.2.3 Failover Hooks & Callbacks
-- **Effort:** 3-4 days
+#### 2.2.3 Failover Hooks & Callbacks ✅ DONE
 - **File:** `src/failover/failover-hooks.ts`
 - **Approach:** `onStateChange`, `onPrimaryChange`, `onTopologyChange`, `onHealthCheck`
 - **Acceptance:** All events trigger hooks, errors don't break failover
 
-#### 2.2.4 Fencing Integration
-- **Effort:** 5-7 days
-- **File:** `src/failover/fencing.ts`
-- **Approach:**
-  - Interface: `FencingProvider`
-  - Implementations: `AdvisoryLockFencingProvider`, `TableBasedFencingProvider`
-  - Integration: Block writes during failover
+#### 2.2.4 Fencing Integration ✅ DONE
+- **File:** `src/failover/fencing.ts`, `src/failover/fencing-manager.ts`
+- **Approach:** Interface: `FencingProvider`; Implementations: `AdvisoryLockFencingProvider`; Integration: Block writes during failover
 - **Acceptance:** Prevents writes during failover, token-based validation
+
+Phase 2 remaining work: **Distributed Transaction Timeout Configuration & Retry Policies** (1.2.1, 1.2.2).
 
 ---
 
@@ -250,8 +276,8 @@ This document outlines the implementation plan to address all missing features r
 | 9-10 | Replication: Load Balancing | `replication-router.ts` |
 | 9-10 | Replication: WAL LSN Tracking | `replication-manager.ts` |
 | 9-10 | Replication: Stats + Hooks | `replication-stats.ts` |
-| 11-12 | Failover: Event History | `failover-state-store.ts` |
-| 11-12 | Failover: Thresholds | `failover-config.ts` |
+| 11-12 | Failover: Event History | `failover-event-store.ts` |
+| 11-12 | Failover: Thresholds | `health-check-tracker.ts` |
 | 11-12 | Failover: Hooks + Callbacks | `failover-hooks.ts` |
 | 13-14 | Failover: Fencing | `fencing.ts` |
 | 13-14 | **Integration Testing** | All |

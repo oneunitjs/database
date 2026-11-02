@@ -1637,115 +1637,120 @@ The application supplies a `MigrationDescriptor` describing each table's primary
 
 ## Failover
 
-High-availability support for PostgreSQL clusters with primary/replica failover. Supports both static configurations and Patroni-managed clusters.
+High-availability support for PostgreSQL clusters with primary/replica failover. The failover layer is a standalone `FailoverManager` that runs health checks, detects primary failures, and orchestrates automatic or manual failover by promoting a replica.
 
-### Configuration
+### Providers
 
-**Static HA Provider** (simple deployments):
+A `HaProvider` discovers the current topology and performs promotion/verification. Two implementations are bundled:
+
+**StaticHaProvider** — simple deployments with a statically configured primary. No automatic promotion; failover requires operator intervention.
 
 ```javascript
-import { createDatabase, StaticHaProvider } from "@oneunit/database";
+import { FailoverManager, StaticHaProvider } from "@oneunit/database";
 
-const db = createDatabase({
-  failover: {
-    provider: "static",
-    staticConfig: {
-      primary: {
-        id: "primary",
-        host: "primary-host",
-        port: 5432,
-        database: "mydb",
-        user: "postgres",
-        password: "secret",
-      },
-      replicas: [
-        {
-          id: "replica-1",
-          host: "replica-1-host",
-          port: 5432,
-          database: "mydb",
-          user: "postgres",
-          password: "secret",
-        },
-      ],
-    },
-    healthCheckIntervalMs: 10000,
-    failoverTimeoutMs: 30000,
-  },
+const provider = new StaticHaProvider(new Map([
+  ["shard-0", {
+    id: "shard-0",
+    host: "primary-host",
+    port: 5432,
+    database: "mydb",
+    user: "postgres",
+    connectionString: "postgresql://postgres@primary-host:5432/mydb",
+  }],
+]));
+
+const config = {
+  enabled: true,
+  provider,
+  healthCheckIntervalMs: 5_000,
+  failureThreshold: 3,
+  recoveryThreshold: 2,
+  suspectTimeoutMs: 30_000,
+  promotionTimeoutMs: 30_000,
+  verificationTimeoutMs: 15_000,
+};
+
+const failover = new FailoverManager({
+  shardId: "shard-0",
+  primaryPool,
+  config,
+  logger,
 });
+
+await failover.initialize();
 ```
 
-**Patroni HA Provider** (production Patroni clusters):
+**PatroniHaProvider** — production Patroni-managed clusters. Detects the primary and replicas from the Patroni REST API and supports automatic promotion.
 
 ```javascript
-import { createDatabase, PatroniHaProvider } from "@oneunit/database";
+import { FailoverManager, PatroniHaProvider } from "@oneunit/database";
 
-const db = createDatabase({
-  failover: {
-    provider: "patroni",
-    patroniConfig: {
-      restApiUrl: "http://patroni-cluster:8008",
-      // Optional: DCS endpoint (etcd, ZooKeeper, etc.)
-      dcsEndpoint: "http://etcd:2379",
-    },
-    healthCheckIntervalMs: 10000,
-    failoverTimeoutMs: 30000,
-  },
+const provider = new PatroniHaProvider("http://patroni-cluster:8008");
+
+const failover = new FailoverManager({
+  shardId: "shard-0",
+  primaryPool,
+  config: { enabled: true, provider, healthCheckIntervalMs: 5_000 },
+  logger,
 });
-```
 
-### Failover API
-
-```javascript
-// Get current topology
-const topology = await db.failover.getTopology();
-console.log("Primary:", topology.primaryNode);
-console.log("Replicas:", topology.replicaNodes);
-
-// Check health
-const health = await db.failover.healthCheck();
-console.log("Status:", health.status); // "active", "degraded", "failover", etc.
-
-// Get current state
-const state = await db.failover.getState();
-console.log("State:", state); // "active", "degraded", "failover", "split-brain", "no-primary", "unknown"
+await failover.initialize();
 ```
 
 ### Failover States
 
-| State | Description | Action Required |
-| :--- | :--- | :--- |
-| `active` | Primary available, replicas healthy | Normal operation |
-| `degraded` | Primary available, some replicas unhealthy | Monitor replicas |
-| `failover` | Failover in progress | Wait for completion |
-| `split-brain` | Multiple primaries detected | **CRITICAL** - Manual intervention |
-| `no-primary` | No primary available | Promote replica or restore primary |
-| `unknown` | Initial state, health not yet checked | Wait for health check |
+| State | Description |
+| :--- | :--- |
+| `healthy` | Primary available and responding to health checks |
+| `suspect` | Primary failing health checks; failover may be initiated |
+| `primary_unavailable` | Primary unavailable for longer than `suspectTimeoutMs`; failover is requested |
+| `failover_requested` | Failover approved; waiting for promotion |
+| `promoting` | A replica is being promoted to primary |
+| `verifying` | The new primary is being verified as writable |
+| `primary_changed` | New primary confirmed; failover complete |
+| `recovering` | Connections and pools being re-established |
+| `failed` | Failover could not complete; operator intervention required |
+
+Transitions follow `healthy → suspect → primary_unavailable → failover_requested → promoting → verifying → primary_changed → recovering → healthy`. `failed` is terminal and can only move to `recovering`.
+
+### Failover API
+
+```javascript
+// Get current topology from the HA provider
+const topology = await failover.getTopology();
+console.log("Primary:", topology.primary);
+console.log("Replicas:", topology.replicas);
+
+// Current failover state
+console.log("State:", failover.currentState);          // FailoverState
+console.log("Primary:", failover.currentPrimary);        // string | undefined
+console.log("Generation:", failover.currentGeneration);  // number
+
+// Report a primary failure detected by the query/transaction path
+await failover.reportPrimaryFailure("connection lost");
+
+// Report a successful operation on the primary
+await failover.reportPrimarySuccess();
+
+// Request a manual failover (operator-initiated)
+await failover.requestManualFailover("planned maintenance");
+
+// Register a connection so it is invalidated on failover
+failover.registerConnection("primary", "shard-0", client);
+failover.markInTransaction(client, "tx-123");
+
+// Invalidate all connections to the current primary
+const result = await failover.invalidatePrimaryConnections();
+
+// Check whether a node is fenced
+const fenced = await failover.isFenced("node-1");
+```
 
 ### Failover Events
 
-Subscribe to state change events:
+State transitions are recorded as failover events. The state machine tracks `fromState`, `toState`, `reason`, and `triggeredBy` on each event, available via `failover.failoverState.failoverEvents`.
 
-```javascript
-db.failover.on("state-change", (event) => {
-  console.log(`State changed: ${event.fromState} -> ${event.toState}`);
-  console.log("Reason:", event.error || "manual");
-});
-
-db.failover.on("topology-change", (topology) => {
-  console.log("New primary:", topology.primaryNode?.id);
-});
-```
-
-### Manual Failover
-
-```javascript
-// Trigger failover (with StaticHaProvider)
-await db.failover.triggerFailover();
-
-// Or promote a specific replica
-await db.failover.promoteReplica("replica-1");
-```
+When an `eventStore` is configured, every state change is also persisted for auditing (see "Failover Event History" below).
 
 ### Error Handling
 
@@ -1755,26 +1760,315 @@ import {
   FailoverNotSupportedError,
   SplitBrainPreventedError,
   PrimaryNotVerifiedError,
+  isFailoverError,
 } from "@oneunit/database";
 
 try {
-  await db.failover.promoteReplica("replica-1");
+  await failover.requestManualFailover("maintenance");
 } catch (error) {
-  if (error instanceof SplitBrainPreventedError) {
-    console.error("SPLIT BRAIN DETECTED! Manual intervention required!");
-  } else if (error instanceof FailoverNotSupportedError) {
-    console.error("Failover not supported with current provider");
+  if (isFailoverError(error)) {
+    console.error(`Failover error on shard ${error.shardId}:`, error.message);
   }
 }
 ```
 
 ### Production Best Practices
 
-1. **Monitor `split-brain` state** — Alert immediately and investigate
-2. **Test failover procedures** — Regularly test in staging
-3. **Configure appropriate timeouts** — Match your SLA requirements
-4. **Use Patroni for production** — Better primary detection and automatic failover
-5. **Monitor health checks** — Ensure all nodes are being checked regularly
+1. **Use Patroni for production** — automatic primary detection and promotion
+2. **Configure timeouts to match your SLA** — `healthCheckIntervalMs`, `failureThreshold`, `suspectTimeoutMs`, `promotionTimeoutMs`, `verificationTimeoutMs`
+3. **Persist state across restarts** — configure a `stateStore` so failover state survives manager restarts
+4. **Test failover procedures** — regularly in staging
+5. **Monitor health checks and fencing** — ensure all nodes are checked and fenced nodes are blocked
+
+### Advanced Failover Configuration
+
+All advanced options are opt-in and passed to the `FailoverManager` constructor. Existing configurations continue to work unchanged.
+
+#### Persistent State Storage
+
+Persist failover state across restarts using a coordination database:
+
+```javascript
+import { FailoverManager, PgFailoverStateStore, FAILOVER_STATE_SCHEMA } from "@oneunit/database";
+
+// Execute the schema against your coordination database first
+await coordinationPool.query(FAILOVER_STATE_SCHEMA);
+
+const stateStore = new PgFailoverStateStore(coordinationPool, logger);
+
+const failover = new FailoverManager({
+  shardId: "shard-0",
+  primaryPool,
+  config: { enabled: true, provider },
+  logger,
+  stateStore,
+  recoveryOptions: {
+    autoReconcile: true,
+    forceRecovery: false,
+    maxStateAgeMs: 300_000, // State older than 5 min is considered stale
+  },
+});
+
+await failover.initialize();
+```
+
+Schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS _database_ha_state (
+    shard_id TEXT NOT NULL PRIMARY KEY,
+    state_json JSONB NOT NULL,
+    version BIGINT NOT NULL DEFAULT 1,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS _database_ha_state_versions (
+    id BIGSERIAL PRIMARY KEY,
+    shard_id TEXT NOT NULL,
+    state_json JSONB NOT NULL,
+    version BIGINT NOT NULL,
+    previous_version BIGINT NOT NULL,
+    changed_by TEXT NOT NULL,
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS _database_ha_locks (
+    lock_name TEXT NOT NULL PRIMARY KEY,
+    locked_by TEXT NOT NULL,
+    locked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    lock_expiry TIMESTAMPTZ NOT NULL
+);
+```
+
+#### Connection Invalidation
+
+Track connections per node so they are invalidated when the primary fails. Connections in active transactions are reported but not forcibly closed.
+
+```javascript
+import { ConnectionTracker } from "@oneunit/database";
+
+const connectionTracker = new ConnectionTracker({
+  cleanupIntervalMs: 60_000,
+  maxIdleMs: 300_000,
+});
+
+const failover = new FailoverManager({
+  shardId: "shard-0",
+  primaryPool,
+  config: { enabled: true, provider },
+  logger,
+  connectionTracker,
+});
+
+// Callers register connections when acquiring clients
+failover.registerConnection("primary", "shard-0", client);
+
+// Connections are invalidated automatically before primary promotion
+```
+
+#### Failure Detection Thresholds
+
+Configure per-node failure detection with `HealthCheckTracker`:
+
+```javascript
+import { HealthCheckTracker } from "@oneunit/database";
+
+const healthTracker = new HealthCheckTracker({
+  consecutiveFailureThreshold: 3,
+  unhealthyDurationThresholdMs: 30_000,
+  consecutiveSuccessThreshold: 2,
+  healthCheckIntervalMs: 5_000,
+  unhealthyHealthCheckMultiplier: 0.5,
+  nodeThresholds: {
+    "primary-1": {
+      consecutiveFailures: 5,
+      unhealthyDurationMs: 60_000,
+    },
+  },
+}, logger);
+
+const failover = new FailoverManager({
+  shardId: "shard-0",
+  primaryPool,
+  config: { enabled: true, provider },
+  logger,
+  healthTracker,
+});
+```
+
+#### Failover Hooks
+
+Register lifecycle hooks via `FailoverHookRunner`. Hook errors are caught and logged so a failing hook never breaks failover.
+
+```javascript
+import { FailoverHookRunner } from "@oneunit/database";
+
+const hookRunner = new FailoverHookRunner(logger);
+hookRunner.registerHook("beforeStateChange", (context) => {
+  console.log(`Transitioning ${context.data.fromState.state} -> ${context.data.toState.state}`);
+});
+hookRunner.registerHook("afterFailover", (context) => {
+  console.log(`Failover complete. New primary: ${context.data.newPrimary?.id}`);
+});
+
+const failover = new FailoverManager({
+  shardId: "shard-0",
+  primaryPool,
+  config: { enabled: true, provider },
+  logger,
+  hooks: hookRunner,
+});
+```
+
+Available hook types: `beforeStateChange`, `afterStateChange`, `beforeFailover`, `afterFailover`, `failoverFailed`, `beforePromotion`, `afterPromotion`, `promotionFailed`, `beforeDemotion`, `afterDemotion`, `demotionFailed`, `beforeHealthCheck`, `afterHealthCheck`, `onPrimaryChange`, `onTopologyChange`, `onFencingActivated`, `onFencingReleased`.
+
+#### Pool Reconnection
+
+Reconnect primary and replica pools after failover with exponential backoff:
+
+```javascript
+import { PoolReconnector } from "@oneunit/database";
+
+const poolReconnector = new PoolReconnector(
+  poolMap,           // Map<nodeId, Pool>
+  configProvider,    // (nodeId) => Promise<PoolConfig>
+  logger,
+  {
+    maxRetries: 5,
+    retryDelayMs: 1_000,
+    maxRetryDelayMs: 30_000,
+    validatePool: true,
+  }
+);
+
+const failover = new FailoverManager({
+  shardId: "shard-0",
+  primaryPool,
+  config: { enabled: true, provider },
+  logger,
+  poolReconnector,
+});
+```
+
+Pools are swapped atomically — the new pool is validated before the old pool is closed.
+
+#### Fencing Integration
+
+Prevent a node from assuming the primary role during failover:
+
+```javascript
+import {
+  AdvisoryLockFencingProvider,
+  TableBasedFencingProvider,
+  FencingManager,
+  FENCING_SCHEMA,
+} from "@oneunit/database";
+
+// Execute the schema against your coordination database first
+await coordinationPool.query(FENCING_SCHEMA);
+
+const fencingProvider = new TableBasedFencingProvider(coordinationPool, logger);
+// Or, for advisory-lock-based fencing:
+// const fencingProvider = new AdvisoryLockFencingProvider(coordinationPool, logger);
+
+const fencingManager = new FencingManager(fencingProvider, logger);
+
+const failover = new FailoverManager({
+  shardId: "shard-0",
+  primaryPool,
+  config: { enabled: true, provider },
+  logger,
+  fencingManager,
+});
+```
+
+Schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS _database_fencing_locks (
+    node_id TEXT NOT NULL PRIMARY KEY,
+    lock_id BIGINT NOT NULL,
+    reason TEXT NOT NULL,
+    expires_at TIMESTAMPTZ,
+    priority INTEGER NOT NULL DEFAULT 1,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    activated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    activated_by TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS _database_fencing_history (
+    id BIGSERIAL PRIMARY KEY,
+    node_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    reason TEXT,
+    priority INTEGER,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    performed_by TEXT NOT NULL,
+    performed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+Fenced nodes are blocked during health checks and failover.
+
+#### Failover Event History
+
+Record and query failover events for auditing:
+
+```javascript
+import { PgFailoverEventStore, FAILOVER_EVENT_SCHEMA } from "@oneunit/database";
+
+// Execute the schema against your coordination database first
+await coordinationPool.query(FAILOVER_EVENT_SCHEMA);
+
+const eventStore = new PgFailoverEventStore(coordinationPool, logger);
+
+const failover = new FailoverManager({
+  shardId: "shard-0",
+  primaryPool,
+  config: { enabled: true, provider },
+  logger,
+  eventStore,
+});
+
+// Query events
+const { events, total } = await eventStore.queryEvents({
+  shardId: "shard-0",
+  type: "state_change",
+  severity: "warning",
+  startTime: new Date(Date.now() - 86_400_000), // last 24h
+});
+
+// Statistics
+const stats = await eventStore.getStatistics();
+// { totalEvents, eventsByType, eventsBySeverity, eventsByShard, firstEvent, lastEvent }
+
+// Cleanup old events
+await eventStore.cleanupEvents(30); // retain 30 days
+```
+
+Schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS _database_ha_events (
+    id BIGSERIAL PRIMARY KEY,
+    event_id UUID NOT NULL UNIQUE,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    type TEXT NOT NULL,
+    shard_id TEXT NOT NULL,
+    node_id TEXT,
+    details JSONB NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'info',
+    previous_state TEXT,
+    new_state TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ha_events_shard_id ON _database_ha_events(shard_id);
+CREATE INDEX IF NOT EXISTS idx_ha_events_type ON _database_ha_events(type);
+CREATE INDEX IF NOT EXISTS idx_ha_events_timestamp ON _database_ha_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_ha_events_severity ON _database_ha_events(severity);
+```
 
 ---
 

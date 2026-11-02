@@ -689,12 +689,18 @@ The distributed transaction layer implements two-phase commit (2PC) for cross-sh
 
 **When to Use: When you need high availability with automatic primary/replica switching**
 
-The failover layer provides high-availability capabilities:
+The failover layer provides production-grade high-availability capabilities:
 
-- Primary/replica role management
-- Automatic failover when primary becomes unavailable
-- State machine for drain-and-wait semantics (ACTIVE → DRAINING → DRAINED → REMOVED)
-- HA provider integration for external failover detection
+- **State machine** — Shard failover states (`healthy` → `suspect` → `primary_unavailable` → `failover_requested` → `promoting` → `verifying` → `primary_changed` → `recovering` → `failed`)
+- **Persistent state storage** — `FailoverStateStore` with `PgFailoverStateStore` (PostgreSQL, optimistic concurrency, version history) and `MemoryFailoverStateStore` (testing); schema: `_database_ha_state`, `_database_ha_state_versions`, `_database_ha_locks`
+- **State recovery after restart** — `FailoverRecoveryManager` with per-shard recovery locking, state validation, and auto-reconciliation
+- **Connection invalidation** — `ConnectionTracker` tracks per-node connections; invalidates connections to the old primary before promotion, respects active transactions
+- **Health-check failure classification** — `HealthCheckClassifier` categorizes errors (`connection_refused`, `connection_timeout`, `authentication_failed`, `server_error`, etc.) with severity, retryable, and failover-immediately flags
+- **Failure detection thresholds** — `HealthCheckTracker` with per-node configurable consecutive failure/success thresholds, unhealthy duration, dynamic health check intervals
+- **Lifecycle hooks** — `FailoverHookRunner` for before/after state change, before/after failover, before/after promotion, before/after health check hooks
+- **Pool reconnection** — `PoolReconnector` reconnects primary and replica pools after failover with exponential backoff retry
+- **Fencing integration** — `FencingProvider` / `AdvisoryLockFencingProvider` / `FencingManager` for advisory-lock-based node fencing during failover; `FENCING_SCHEMA` tables: `_database_fencing_locks`, `_database_fencing_history`
+- **Event history** — `FailoverEventStore` with `PgFailoverEventStore` (PostgreSQL) and `MemoryFailoverEventStore` (testing); schema: `_database_ha_events` with query, cleanup, and statistics
 
 **Architecture Pattern:** Replicated deployment with automatic failover
 
@@ -721,6 +727,26 @@ The failover layer provides high-availability capabilities:
 - Or managed database service with failover support (RDS, Cloud SQL, etc.)
 - Network configuration for failover detection
 - Monitoring for primary/replica health
+
+**Usage Example:**
+```typescript
+import { FailoverManager, PgFailoverStateStore, ConnectionTracker, HealthCheckClassifier } from "@oneunit/database";
+
+const stateStore = new PgFailoverStateStore(coordinationPool);
+const connectionTracker = new ConnectionTracker();
+const classifier = new HealthCheckClassifier();
+
+const failover = new FailoverManager({
+    shardId: "shard-0",
+    primaryPool: primaryPool,
+    config: failoverConfig,
+    logger,
+    stateStore,
+    connectionTracker,
+    recoveryOptions: { autoReconcile: true },
+});
+await failover.initialize();
+```
 
 ---
 
@@ -1019,9 +1045,19 @@ Each factory receives only the dependencies it needs (pool, query function, logg
 
 | File | Factory / Class | Produces | Key Dependencies |
 | :--- | :--- | :--- | :--- |
-| `failover-manager.ts` | `FailoverManager` | failover control | — |
-| `ha-provider.ts` | `HAProvider` | primary/replica switching | replication topology |
-| `failover-state-machine.ts` | state machine | ACTIVE/DRAINING/DRAINED/REMOVED | — |
+| `failover-manager.ts` | `FailoverManager` | failover control | config, provider, optional stores |
+| `ha-provider.ts` | `HAProvider` / `StaticHaProvider` / `PatroniHaProvider` | primary/replica switching | replication topology |
+| `failover-state-store.ts` | `FailoverStateStore` / `PgFailoverStateStore` / `MemoryFailoverStateStore` | durable state per shard | pg.Pool (Pg impl) |
+| `failover-state-machine.ts` | state machine | state transitions + validation | — |
+| `failover-event-store.ts` | `FailoverEventStore` / `PgFailoverEventStore` / `MemoryFailoverEventStore` | failover event history | pg.Pool (Pg impl) |
+| `failover-recovery.ts` | `FailoverRecoveryManager` | state recovery after restart | FailoverStateStore |
+| `connection-tracker.ts` | `ConnectionTracker` | connection tracking + invalidation | pg PoolClient |
+| `health-classifier.ts` | `HealthCheckClassifier` | failure categorization | — |
+| `health-check-tracker.ts` | `HealthCheckTracker` | per-node failure thresholds | config, logger |
+| `failover-hooks.ts` | `FailoverHookRunner` | lifecycle hook dispatch | logger |
+| `pool-reconnector.ts` | `PoolReconnector` | pool reconnection after failover | pg.Pool, config provider |
+| `fencing.ts` | `FencingProvider` / `AdvisoryLockFencingProvider` / `FencedError` | node fencing | pg.Pool |
+| `fencing-manager.ts` | `FencingManager` | multi-provider fencing orchestration | FencingProvider |
 | `errors.ts` | error classes | Failover errors | — |
 
 ### model/
@@ -1732,172 +1768,232 @@ Durable tables store transaction state, participant lists, and prepared transact
 
 ### Overview
 
-High-availability provider and state machine for managing primary/replica failover. Provides automatic and manual failover capabilities for PostgreSQL clusters with primary-replica replication. States: `ACTIVE` → `DRAINING` → `DRAINED` → `REMOVED`.
+High-availability provider and state machine for managing primary/replica failover. Provides automatic and manual failover capabilities for PostgreSQL clusters with primary-replica replication. States: `healthy` → `suspect` → `primary_unavailable` → `failover_requested` → `promoting` → `verifying` → `primary_changed` → `recovering` → `failed`.
 
 This layer enables applications to maintain availability during primary failures by automatically or manually promoting replicas to primary status.
 
 ### FailoverManager (`failover/failover-manager.ts`)
 
-Controls failover operations, serializing topology changes via mutex to ensure consistency:
+Controls failover operations, serializing topology changes via a mutex to ensure consistency:
 
-- Manages HA provider instances (StaticHaProvider, PatroniHaProvider)
+- Manages HA provider instances (`StaticHaProvider`, `PatroniHaProvider`)
 - Tracks current failover state
-- Coordinates failover transitions
-- Provides health checks and status reporting
-- Handles split-brain prevention
+- Coordinates failover transitions through a validated state machine
+- Runs periodic health checks on the primary
+- Invalidates connections to the old primary before promotion
+- Reconnects pools and applies fencing during failover
+- Persists state and events to optional durable stores
 
-**Key Functions**:
-- `createInitialFailoverState()` — Creates initial state for a new setup
-- `applyFailoverTransition(currentState, event)` — Applies state transition based on event
-- `nextFailoverState(currentState, event)` — Computes next state without applying
-- `createFailoverEvent(type, context)` — Creates a failover event for state transitions
+**Key Functions** (exported from `failover/failover-state-machine.ts`):
+- `createInitialFailoverState(shardId)` — Creates initial state for a new setup
+- `applyFailoverTransition(state, toState, event)` — Applies a validated state transition
+- `nextFailoverState(current, event)` — Computes the next state without applying
+- `createFailoverEvent(shardId, fromState, toState, reason, triggeredBy)` — Creates a failover event
+
+**Constructor options** (`FailoverManagerOptions`):
+- `shardId`, `primaryPool`, `config` (`FailoverConfig`), `logger`
+- `onStateChange`, `onFailoverComplete` — callbacks
+- `stateStore` (`FailoverStateStore`) — durable state persistence
+- `recoveryOptions` — state recovery on restart
+- `connectionTracker` (`ConnectionTracker`) — per-node connection invalidation
+- `eventStore` (`FailoverEventStore`) — failover event history
+- `healthTracker` (`HealthCheckTracker`) — per-node failure thresholds
+- `hooks` (`FailoverHookRunner`) — lifecycle hooks
+- `poolReconnector` (`PoolReconnector`) — pool reconnection after failover
+- `fencingManager` (`FencingManager`) — node fencing during failover
+
+**Public API**:
+- `initialize()` — recover state, discover topology, start health checks
+- `getTopology()` — current HA topology from the provider
+- `currentState` / `currentPrimary` / `currentGeneration` / `failoverState` — getters
+- `requestManualFailover(reason)` — operator-initiated failover
+- `reportPrimaryFailure(reason)` / `reportPrimarySuccess()` — query-path failure/success reporting
+- `registerConnection(nodeId, shardId, client)` / `unregisterConnection(client)` — connection tracking
+- `markInTransaction(client, txId)` / `markOutOfTransaction(client)` / `touch(client)` — transaction awareness
+- `invalidatePrimaryConnections()` — invalidate connections to the current primary
+- `getConnectionCount()` — total tracked connections
+- `isFenced(nodeId)` / `getFencingStatus(nodeId)` — fencing checks
+- `shutdown()` — stop health checks and clean up
 
 ### HA Providers
 
-Two HA provider implementations are available:
+Two HA provider implementations are available (`failover/ha-provider.ts`):
 
-**StaticHaProvider (`failover/ha-provider.ts`)**
-- Static configuration of primary and replicas
-- Manual failover triggered via API calls
-- No external dependencies
-- Suitable for simple deployments
+**StaticHaProvider** — static configuration of the primary per shard. No automatic promotion; failover requires operator intervention (`supportsPromotion: false`).
 
-**PatroniHaProvider (`failover/ha-provider.ts`)**
-- Integrates with Patroni (PostgreSQL HA solution)
-- Automatically detects primary from Patroni REST API
-- Monitors Patroni health and leader status
-- Suitable for production Patroni deployments
+**PatroniHaProvider** — integrates with Patroni via its REST API. Detects the primary and replicas, supports automatic promotion, verification, and topology generation (`supportsPromotion: true`).
 
-**HAProvider Interface**:
+**HaProvider interface**:
 ```typescript
 interface HaProvider {
-  getTopology(): Promise<HaTopology>;
-  getPrimaryNode(): Promise<HaNodeInfo | null>;
-  getReplicaNodes(): Promise<HaNodeInfo[]>;
-  promoteReplica(nodeId: string): Promise<void>;
-  failover(): Promise<void>;
-  healthCheck(): Promise<HaNodeStatus>;
+  readonly name: string;
+  readonly supportsPromotion: boolean;
+  readonly supportsTopologyGeneration: boolean;
+  readonly supportsReplicationLag: boolean;
+  initialize(): Promise<void>;
+  discoverTopology(shardId: string): Promise<HaTopology>;
+  checkNodeHealth(nodeId: string, connection: HaNodeInfo["connection"]): Promise<HaNodeStatus>;
+  promoteReplica?(shardId: string, replicaId: string): Promise<HaNodeInfo>;
+  verifyPrimary?(nodeId: string, expectedGeneration: number): Promise<boolean>;
+  fenceOldPrimary?(oldPrimaryId: string): Promise<boolean>;
+  getTopologyGeneration?(shardId: string): Promise<number>;
+  shutdown(): Promise<void>;
 }
 ```
 
 ### FailoverStateMachine (`failover/failover-state-machine.ts`)
 
-Enforces legal state transitions and tracks active operations for drain-and-wait semantics:
+Enforces legal state transitions.
 
-**State Types**:
+**State types**:
 ```typescript
-type HaNodeRole = "primary" | "replica" | "standby" | "unknown";
-type HaNodeStatus = "healthy" | "degraded" | "unhealthy" | "unknown";
-type FailoverState = 
-  | "active"          // Normal operation, primary available
-  | "degraded"        // Primary available but replicas unhealthy
-  | "failover"        // Failover in progress
-  | "split-brain"     // Multiple primaries detected
-  | "no-primary"      // No primary available
-  | "unknown";        // Initial state
+type FailoverState =
+  | "healthy"
+  | "suspect"
+  | "primary_unavailable"
+  | "failover_requested"
+  | "promoting"
+  | "verifying"
+  | "primary_changed"
+  | "recovering"
+  | "failed";
 ```
 
-**State Transition Rules**:
-- `ACTIVE` → `FAILOVER` — When primary becomes unhealthy
-- `ACTIVE` → `DEGRADED` — When replicas become unhealthy
-- `FAILOVER` → `ACTIVE` — When new primary is promoted
-- `FAILOVER` → `NO_PRIMARY` — When no replicas available for promotion
-- Any → `SPLIT_BRAIN` — When multiple primaries detected (prevents data divergence)
+**Transition rules**:
+- `healthy` → `suspect` — failure detected
+- `suspect` → `primary_unavailable` — continued failures past `suspectTimeoutMs`
+- `primary_unavailable` → `failover_requested` — failover requested
+- `failover_requested` → `promoting` — promotion started
+- `promoting` → `verifying` — replica promoted
+- `verifying` → `primary_changed` — new primary verified
+- `primary_changed` → `recovering` — failover complete, recovering
+- `recovering` → `healthy` — recovery complete
 
-**Terminal States**: `split-brain`, `no-primary`
-**Transient States**: `failover`, `degraded`
-**Stable State**: `active`
+`failed` is terminal; `recovering` can return to `healthy`.
 
-**Functions**:
-- `isTerminalFailoverState(state)` — Checks if state is terminal
-- `isTransientFailoverState(state)` — Checks if state is transient
+**Functions**: `isTerminalFailoverState(state)`, `isTransientFailoverState(state)` (`failed` is terminal; `suspect`, `primary_unavailable`, `failover_requested`, `promoting`, `verifying` are transient).
 
 ### Failover Topology
 
-**Types**:
+**Types** (`failover/failover-types.ts`):
 ```typescript
 interface HaNodeInfo {
   id: string;
-  name: string;
-  role: HaNodeRole;
-  status: HaNodeStatus;
-  host: string;
-  port: number;
+  role: "primary" | "replica" | "unknown";
+  status: "up" | "down" | "unknown";
+  lagMs: number | null;
+  lagUnknown: boolean;
   lastCheckedAt: string;
+  consecutiveFailures: number;
+  connection: { host?: string; port?: number; database?: string; user?: string; connectionString?: string };
 }
 
 interface HaTopology {
-  nodes: HaNodeInfo[];
-  primaryNode?: HaNodeInfo;
-  replicaNodes: HaNodeInfo[];
-  version: number;
-  updatedAt: string;
+  generation: number;
+  primary: HaNodeInfo | undefined;
+  replicas: HaNodeInfo[];
+  clusterId: string | undefined;
+  capturedAt: string;
 }
 
 interface FailoverConfig {
-  provider: "static" | "patroni";
-  staticConfig?: StaticHaConfig;
-  patroniConfig?: PatroniHaConfig;
+  enabled: boolean;
+  provider: HaProvider;
   healthCheckIntervalMs?: number;
-  failoverTimeoutMs?: number;
+  failureThreshold?: number;
+  recoveryThreshold?: number;
+  suspectTimeoutMs?: number;
+  promotionTimeoutMs?: number;
+  verificationTimeoutMs?: number;
+  maxPreparedTransactionAgeMs?: number;
+  replicationLagThresholdMs?: number;
+}
+
+interface ShardFailoverState {
+  shardId: string;
+  state: FailoverState;
+  currentPrimary?: string;
+  currentGeneration: number;
+  failoverEvents: FailoverEvent[];
+  lastStateChange: string;
+  lastCheckedAt?: string;
+  consecutiveFailures: number;
+  consecutiveSuccesses: number;
 }
 ```
 
 ### Failover Events
 
-**FailoverEvent Type**:
+**FailoverEvent type** (`failover/failover-types.ts`):
 ```typescript
 interface FailoverEvent {
-  type: "primary-failed" | "replica-promoted" | "split-brain" | "health-changed";
+  id: string;
+  shardId: string;
   fromState: FailoverState;
   toState: FailoverState;
+  reason: string;
+  triggeredBy: string;
   timestamp: string;
-  nodeId?: string;
-  error?: string;
   metadata?: Record<string, unknown>;
 }
 ```
 
-### Error Types
+The `FailoverEventStore` (`failover/failover-event-store.ts`) persists these plus health-check, promotion, connection-invalidation, and lock events with `FailoverEventType` values such as `state_change`, `failover_started`, `failover_completed`, `promotion_started`, `connection_invalidated`, `lock_acquired`, `lock_released`.
 
-- `FailoverError` — Base error type for failover failures
-- `FailoverNotSupportedError` — Operation not supported by current provider
-- `SplitBrainPreventedError` — Operation prevented to avoid split-brain
-- `PrimaryNotVerifiedError` — Primary status cannot be verified
+### Error Types (`failover/errors.ts`)
+
+- `FailoverError` — base error type for failover failures
+- `FailoverNotSupportedError` — operation not supported by current provider
+- `SplitBrainPreventedError` — operation prevented to avoid split-brain
+- `PrimaryNotVerifiedError` — primary status cannot be verified
 
 ### Usage Example
 
 ```typescript
-import { createDatabase, PatroniHaProvider } from "@oneunit/database";
+import { FailoverManager, StaticHaProvider, PgFailoverStateStore, FAILOVER_STATE_SCHEMA } from "@oneunit/database";
 
-const db = createDatabase({
-  failover: {
-    provider: "patroni",
-    patroniConfig: {
-      restApiUrl: "http://patroni-cluster:8008",
-    },
+// Execute the failover state schema against your coordination database first
+await coordinationPool.query(FAILOVER_STATE_SCHEMA);
+
+const provider = new StaticHaProvider(shardConfigs);
+const stateStore = new PgFailoverStateStore(coordinationPool, logger);
+
+const failover = new FailoverManager({
+  shardId: "shard-0",
+  primaryPool,
+  config: {
+    enabled: true,
+    provider,
+    healthCheckIntervalMs: 5_000,
+    failureThreshold: 3,
+    recoveryThreshold: 2,
+    suspectTimeoutMs: 30_000,
   },
+  logger,
+  stateStore,
+  recoveryOptions: { autoReconcile: true },
 });
+
+await failover.initialize();
 
 // Get current topology
-const topology = await db.failover.getTopology();
-console.log("Primary:", topology.primaryNode);
+const topology = await failover.getTopology();
+console.log("Primary:", topology.primary);
 
-// Check health
-const health = await db.failover.healthCheck();
-
-// Handle failover events (via hooks)
-db.failover.on("state-change", (event) => {
-  console.log("State changed:", event.fromState, "->", event.toState);
-});
+// Request a manual failover
+await failover.requestManualFailover("planned maintenance");
 ```
 
 ### Production Considerations
 
-- Use `PatroniHaProvider` for Patroni-managed clusters
-- Configure appropriate `healthCheckIntervalMs` (default: 10 seconds)
-- Set `failoverTimeoutMs` to match your SLA requirements
-- Monitor `split-brain` states and alert immediately
+- Use `PatroniHaProvider` for Patroni-managed clusters (automatic primary detection and promotion)
+- Configure `healthCheckIntervalMs`, `failureThreshold`, `suspectTimeoutMs`, `promotionTimeoutMs`, `verificationTimeoutMs` to match your SLA
+- Persist state across restarts with a `stateStore` (`PgFailoverStateStore` / `MemoryFailoverStateStore`)
+- Use `ConnectionTracker` to invalidate connections to the old primary before promotion
+- Use `PoolReconnector` to reconnect pools after failover with exponential backoff
+- Use `FencingManager` with `AdvisoryLockFencingProvider` or `TableBasedFencingProvider` to block fenced nodes
+- Record failover events with `PgFailoverEventStore` / `MemoryFailoverEventStore`
+- Monitor health checks and fenced states; alert immediately on `failed`
 - Test failover procedures regularly
 
 ---
