@@ -85,7 +85,6 @@
   ],
   "author": {
     "name": "mayank",
-    "email": "mayank@oneunitjs.org",
     "url": "https://github.com/oneunitjs"
   },
   "contributors": [],
@@ -107,10 +106,6 @@
     "url": "https://github.com/oneunitjs/database/issues"
   },
   "homepage": "https://github.com/oneunitjs/database/tree/master/packages/database#readme",
-  "funding": {
-    "type": "github",
-    "url": "https://github.com/sponsors/oneunitjs"
-  },
   "dependencies": {
     "pg": "^8.22.0"
   },
