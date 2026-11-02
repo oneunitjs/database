@@ -78,13 +78,13 @@ class DistributedTxTimeoutError extends Error {
 }
 ```
 
-### Acceptance Criteria
-- [ ] Prepare timeout configuration
-- [ ] Per-participant timeout enforcement
-- [ ] Global timeout
-- [ ] Automatic abort on timeout
-- [ ] Proper error handling
-- [ ] Unit tests (100%)
+### Acceptance Criteria ✅ ALL COMPLETE
+- [x] Prepare timeout configuration
+- [x] Per-participant timeout enforcement
+- [x] Global timeout
+- [x] Automatic abort on timeout
+- [x] Proper error handling
+- [x] Unit tests (100%)
 
 ---
 
@@ -122,12 +122,12 @@ async commitTransaction(transactionId: string, participants: ParticipantContext[
 }
 ```
 
-### Acceptance Criteria
-- [ ] Commit timeout configuration
-- [ ] Per-participant enforcement
-- [ ] Global timeout
-- [ ] Error handling
-- [ ] Unit tests (100%)
+### Acceptance Criteria ✅ ALL COMPLETE
+- [x] Commit timeout configuration
+- [x] Per-participant enforcement
+- [x] Global timeout
+- [x] Error handling
+- [x] Unit tests (100%)
 
 ---
 
@@ -168,12 +168,12 @@ async abortTransaction(transactionId: string, participants: ParticipantContext[]
 }
 ```
 
-### Acceptance Criteria
-- [ ] Abort timeout configuration
-- [ ] Per-participant enforcement
-- [ ] Best-effort (continue on errors)
-- [ ] Error handling
-- [ ] Unit tests (100%)
+### Acceptance Criteria ✅ ALL COMPLETE
+- [x] Abort timeout configuration
+- [x] Per-participant enforcement
+- [x] Best-effort (continue on errors)
+- [x] Error handling
+- [x] Unit tests (100%)
 
 ---
 
@@ -245,12 +245,12 @@ async prepareTransaction(transactionId: string, participants: ParticipantContext
 }
 ```
 
-### Acceptance Criteria
-- [ ] RetryPolicy interface
-- [ ] Exponential backoff
-- [ ] Retryable error classification
-- [ ] Integration with coordinator
-- [ ] Unit tests (100%)
+### Acceptance Criteria ✅ ALL COMPLETE
+- [x] RetryPolicy interface
+- [x] Exponential backoff
+- [x] Retryable error classification
+- [x] Integration with coordinator
+- [x] Unit tests (100%)
 
 ---
 
@@ -319,13 +319,13 @@ async prepareTransaction(transactionId: string, participants: ParticipantContext
 }
 ```
 
-### Acceptance Criteria
-- [ ] Hook types and interfaces
-- [ ] Hook runner
-- [ ] Integration at all lifecycle points
-- [ ] Error handling
-- [ ] Registration API
-- [ ] Unit tests (100%)
+### Acceptance Criteria ✅ ALL COMPLETE
+- [x] Hook types and interfaces defined
+- [x] Hook runner implemented
+- [x] Hooks invoked at all lifecycle points
+- [x] Error handling
+- [x] Registration API
+- [x] Unit tests (100%)
 
 ---
 
@@ -400,13 +400,13 @@ async prepareTransaction(transactionId: string, participants: ParticipantContext
 }
 ```
 
-### Acceptance Criteria
-- [ ] Health checker implementation
-- [ ] Configurable options
-- [ ] Health check execution
-- [ ] Status tracking
-- [ ] Integration with coordinator
-- [ ] Unit tests (100%)
+### Acceptance Criteria ✅ ALL COMPLETE
+- [x] Health checker implementation
+- [x] Configurable options
+- [x] Health check execution
+- [x] Status tracking
+- [x] Integration with coordinator
+- [x] Unit tests (100%)
 
 ---
 
@@ -503,14 +503,14 @@ export class TransactionCleanupManager {
 }
 ```
 
-### Acceptance Criteria
-- [ ] Scanner implementation
-- [ ] Cleanup manager
-- [ ] Scan and diagnose
-- [ ] Cleanup orphaned/old transactions
-- [ ] Report generation
-- [ ] Integration with coordinator
-- [ ] Unit tests (100%)
+### Acceptance Criteria ✅ ALL COMPLETE
+- [x] Scanner implementation
+- [x] Cleanup manager
+- [x] Scan and diagnose
+- [x] Cleanup orphaned/old transactions
+- [x] Report generation
+- [x] Integration with coordinator
+- [x] Unit tests (100%)
 
 ---
 

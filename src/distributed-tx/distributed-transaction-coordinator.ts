@@ -8,6 +8,9 @@ import type {
 } from "../failover/failover-types.js";
 import { DatabaseError } from "../client/errors.js";
 import { DISTRIBUTED_TX_SCHEMA } from "./coordinator-schema.js";
+import { RetryPolicy } from "./retry-policy.js";
+import { DistributedTxHookRunner, defaultDistributedTxHookLogger } from "./distributed-tx-hooks.js";
+import type { DistributedTxHookContext } from "./distributed-tx-hooks.js";
 
 export class DistributedTransactionError extends DatabaseError {
     constructor(message: string, public readonly transactionId?: string, public readonly cause?: Error) {
@@ -16,6 +19,35 @@ export class DistributedTransactionError extends DatabaseError {
         this.transient = false;
     }
 }
+
+export class DistributedTxTimeoutError extends DistributedTransactionError {
+    constructor(
+        message: string,
+        public readonly transactionId?: string,
+        public readonly cause?: Error,
+        public readonly phase?: "prepare" | "commit" | "abort" | "global",
+        public readonly timeoutMs?: number,
+        public readonly shardId?: string,
+    ) {
+        super(message, transactionId, cause);
+        this.name = "DistributedTxTimeoutError";
+        this.transient = true;
+    }
+}
+
+export interface DistributedTxTimeoutConfig {
+    prepareTimeoutMs: number;
+    commitTimeoutMs: number;
+    abortTimeoutMs: number;
+    globalTimeoutMs: number;
+}
+
+export const DEFAULT_DISTRIBUTED_TX_TIMEOUTS: Required<DistributedTxTimeoutConfig> = {
+    prepareTimeoutMs: 30_000,
+    commitTimeoutMs: 30_000,
+    abortTimeoutMs: 30_000,
+    globalTimeoutMs: 300_000,
+};
 
 export class DistributedTxNotFoundError extends DistributedTransactionError {
     constructor(transactionId: string) {
@@ -59,6 +91,9 @@ export interface DistributedTxCoordinatorOptions {
     coordinationPool: Pool;
     coordinatorId?: string;
     maxPreparedTransactionAgeMs?: number;
+    timeouts?: Partial<DistributedTxTimeoutConfig>;
+    retryPolicy?: RetryPolicy;
+    hookRunner?: DistributedTxHookRunner;
     logger: RequiredDistributedTxLogger;
 }
 
@@ -66,6 +101,9 @@ export class DistributedTransactionCoordinator {
     private readonly coordinationPool: Pool;
     private readonly coordinatorId: string;
     private readonly maxPreparedTransactionAgeMs: number;
+    private readonly timeouts: Required<DistributedTxTimeoutConfig>;
+    private readonly retryPolicy: RetryPolicy;
+    private readonly hookRunner: DistributedTxHookRunner;
     private readonly logger: RequiredDistributedTxLogger;
     private readonly participantPools = new Map<string, Pool>();
     private readonly activeTransactions = new Map<string, {
@@ -80,14 +118,71 @@ export class DistributedTransactionCoordinator {
 
     constructor(options: DistributedTxCoordinatorOptions) {
         this.coordinationPool = options.coordinationPool;
-        this.coordinatorId = options.coordinatorId ?? `coord-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        this.coordinatorId = options.coordinatorId ?? `coord-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
         this.maxPreparedTransactionAgeMs = options.maxPreparedTransactionAgeMs ?? 300000;
+        this.timeouts = { ...DEFAULT_DISTRIBUTED_TX_TIMEOUTS, ...options.timeouts };
+        this.retryPolicy = options.retryPolicy ?? new RetryPolicy();
+        this.hookRunner = options.hookRunner ?? new DistributedTxHookRunner(defaultDistributedTxHookLogger);
         this.logger = options.logger ?? {
             debug: () => {},
             info: () => {},
             warn: () => {},
             error: () => {},
         };
+    }
+
+    private async withTimeout<T>(
+        promise: () => Promise<T>,
+        ms: number,
+        phase: "prepare" | "commit" | "abort",
+        transactionId?: string,
+        shardId?: string,
+    ): Promise<T> {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeoutReject = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+                const message =
+                    phase +
+                    " timed out after " +
+                    ms +
+                    "ms" +
+                    (shardId ? " on shard " + shardId : "");
+                reject(
+                    new DistributedTxTimeoutError(
+                        message,
+                        transactionId,
+                        undefined,
+                        phase,
+                        ms,
+                        shardId,
+                    ),
+                );
+            }, ms);
+        });
+        try {
+            return await Promise.race([promise(), timeoutReject]);
+        } finally {
+            if (timer !== undefined) {
+                clearTimeout(timer);
+            }
+        }
+    }
+
+    private assertGlobalTimeout(startTime: number, transactionId: string): void {
+        const elapsed = Date.now() - startTime;
+        if (elapsed >= this.timeouts.globalTimeoutMs) {
+            throw new DistributedTxTimeoutError(
+                "Global transaction timeout exceeded (" +
+                    elapsed +
+                    "ms >= " +
+                    this.timeouts.globalTimeoutMs +
+                    "ms)",
+                transactionId,
+                undefined,
+                "global",
+                this.timeouts.globalTimeoutMs,
+            );
+        }
     }
 
     /**
@@ -263,15 +358,27 @@ export class DistributedTransactionCoordinator {
             }
         }
 
-        await this.coordinationPool.query(
-            `UPDATE distributed_transactions SET status = 'preparing', updated_at = NOW() WHERE transaction_id = $1`,
-            [transactionId],
-        );
+        this.assertGlobalTimeout(txState?.startTime ?? Date.now(), transactionId);
 
         const participants = txState?.participants ??
             new Map((await this.getDurableParticipants(transactionId)).map(
                 (p) => [p.shardId, { shardId: p.shardId, client: null as any, pool: null as any, preparedTransactionId: p.preparedTransactionId }],
             ));
+
+        await this.hookRunner.invoke("beforePrepare", {
+            transactionId,
+            coordinator: {
+                getCurrentState: () => this.currentState,
+                getCurrentTransactionId: () => transactionId,
+                getParticipantCount: () => participants.size,
+            },
+            data: { participants: Array.from(participants.keys()) },
+        });
+
+        await this.coordinationPool.query(
+            `UPDATE distributed_transactions SET status = 'preparing', updated_at = NOW() WHERE transaction_id = $1`,
+            [transactionId],
+        );
 
         const prepareErrors: Array<{ shardId: string; error: Error }> = [];
 
@@ -285,7 +392,15 @@ export class DistributedTransactionCoordinator {
             try {
                 const preparedId = `pg_${transactionId}_${shardId}`;
 
-                await client.query(`PREPARE TRANSACTION '${preparedId}'`);
+                await this.retryPolicy.execute(async () => {
+                    await this.withTimeout(
+                        () => client.query(`PREPARE TRANSACTION '${preparedId}'`),
+                        this.timeouts.prepareTimeoutMs,
+                        "prepare",
+                        transactionId,
+                        shardId,
+                    );
+                });
 
                 await this.coordinationPool.query(
                     `INSERT INTO distributed_transaction_participants (transaction_id, shard_id, prepared_transaction_id, participant_status, prepared_at)
@@ -301,6 +416,17 @@ export class DistributedTransactionCoordinator {
                     "Participant prepared",
                 );
             } catch (error) {
+                if (error instanceof DistributedTxTimeoutError) {
+                    prepareErrors.push({
+                        shardId,
+                        error,
+                    });
+                    this.logger.error(
+                        { transactionId, shardId, err: error },
+                        "Participant prepare timed out",
+                    );
+                    continue;
+                }
                 prepareErrors.push({
                     shardId,
                     error: error instanceof Error ? error : new Error(String(error)),
@@ -341,6 +467,19 @@ export class DistributedTransactionCoordinator {
             );
 
             const firstError = prepareErrors[0];
+            await this.hookRunner.invoke("prepareFailed", {
+                transactionId,
+                coordinator: {
+                    getCurrentState: () => "preparing",
+                    getCurrentTransactionId: () => transactionId,
+                    getParticipantCount: () => participants.size,
+                },
+                data: {
+                    error: firstError.error,
+                    preparedCount: participants.size - prepareErrors.length,
+                    failedCount: prepareErrors.length,
+                },
+            });
             throw new DistributedTransactionError(
                 `Prepare failed on ${prepareErrors.length} participant(s). First error on "${firstError.shardId}": ${firstError.error.message}`,
                 transactionId,
@@ -361,6 +500,19 @@ export class DistributedTransactionCoordinator {
             { transactionId, participantCount: participants.size, coordinatorId: this.coordinatorId },
             "All participants prepared — ready for global commit decision",
         );
+
+        const preparedIds = Array.from(participants.keys()).filter(
+            (shardId) => txState?.participants.get(shardId)?.preparedTransactionId != null,
+        );
+        await this.hookRunner.invoke("afterPrepare", {
+            transactionId,
+            coordinator: {
+                getCurrentState: () => "prepared",
+                getCurrentTransactionId: () => transactionId,
+                getParticipantCount: () => participants.size,
+            },
+            data: { preparedTransactionIds: preparedIds, durationMs: Date.now() - (txState?.startTime ?? 0) },
+        });
     }
 
     /**
@@ -381,6 +533,23 @@ export class DistributedTransactionCoordinator {
             throw new DistributedTxAlreadyResolvedError(transactionId, durable.status);
         }
 
+        this.assertGlobalTimeout(
+            txState?.startTime ?? new Date(durable.createdAt).getTime(),
+            transactionId,
+        );
+
+        const participantRecords = await this.getDurableParticipants(transactionId);
+
+        await this.hookRunner.invoke("beforeCommit", {
+            transactionId,
+            coordinator: {
+                getCurrentState: () => "prepared",
+                getCurrentTransactionId: () => transactionId,
+                getParticipantCount: () => participantRecords.length,
+            },
+            data: { participantCount: participantRecords.length },
+        });
+
         await this.coordinationPool.query(
             `UPDATE distributed_transactions SET status = 'committing', global_decision = 'COMMIT', decision_persisted_at = NOW(), updated_at = NOW() WHERE transaction_id = $1`,
             [transactionId],
@@ -390,8 +559,6 @@ export class DistributedTransactionCoordinator {
             txState.status = "committing";
             txState.globalDecision = "COMMIT";
         }
-
-        const participantRecords = await this.getDurableParticipants(transactionId);
 
         const commitErrors: Array<{ shardId: string; error: Error }> = [];
 
@@ -435,7 +602,16 @@ export class DistributedTransactionCoordinator {
                     });
                     continue;
                 }
-                await client.query(`COMMIT PREPARED '${record.preparedTransactionId}'`);
+                const clientRef = client;
+                await this.retryPolicy.execute(async () => {
+                    await this.withTimeout(
+                        () => clientRef.query(`COMMIT PREPARED '${record.preparedTransactionId}'`),
+                        this.timeouts.commitTimeoutMs,
+                        "commit",
+                        transactionId,
+                        record.shardId,
+                    );
+                });
 
                 await this.coordinationPool.query(
                     `UPDATE distributed_transaction_participants SET participant_status = 'committed', completed_at = NOW() WHERE transaction_id = $1 AND shard_id = $2`,
@@ -447,6 +623,9 @@ export class DistributedTransactionCoordinator {
                     "Participant committed",
                 );
             } catch (error) {
+                if (error instanceof DistributedTxTimeoutError) {
+                    throw error;
+                }
                 commitErrors.push({
                     shardId: record.shardId,
                     error: error instanceof Error ? error : new Error(String(error)),
@@ -479,6 +658,19 @@ export class DistributedTransactionCoordinator {
 
         if (commitErrors.length > 0) {
             const firstError = commitErrors[0];
+            await this.hookRunner.invoke("commitFailed", {
+                transactionId,
+                coordinator: {
+                    getCurrentState: () => "committing",
+                    getCurrentTransactionId: () => transactionId,
+                    getParticipantCount: () => txState?.participants.size ?? 0,
+                },
+                data: {
+                    error: firstError.error,
+                    committedCount: participantRecords.length - commitErrors.length,
+                    failedCount: commitErrors.length,
+                },
+            });
             throw new DistributedTransactionError(
                 `Global COMMIT decision persisted but ${commitErrors.length} participant(s) failed to commit. First error on "${firstError.shardId}": ${firstError.error.message}. Recovery will retry.`,
                 transactionId,
@@ -490,6 +682,19 @@ export class DistributedTransactionCoordinator {
             { transactionId, coordinatorId: this.coordinatorId },
             "Distributed transaction committed",
         );
+
+        const committedCount = participantRecords.filter(
+            (r) => r.participantStatus === "committed",
+        ).length;
+        await this.hookRunner.invoke("afterCommit", {
+            transactionId,
+            coordinator: {
+                getCurrentState: () => "committed",
+                getCurrentTransactionId: () => transactionId,
+                getParticipantCount: () => participantRecords.length,
+            },
+            data: { committedCount, durationMs: Date.now() - (txState?.startTime ?? 0) },
+        });
     }
 
     /**
@@ -512,6 +717,23 @@ export class DistributedTransactionCoordinator {
             throw new DistributedTxAlreadyResolvedError(transactionId, durable.status);
         }
 
+        this.assertGlobalTimeout(
+            txState?.startTime ?? new Date(durable.createdAt).getTime(),
+            transactionId,
+        );
+
+        const participantRecords = await this.getDurableParticipants(transactionId);
+
+        await this.hookRunner.invoke("beforeAbort", {
+            transactionId,
+            coordinator: {
+                getCurrentState: () => durable.status,
+                getCurrentTransactionId: () => transactionId,
+                getParticipantCount: () => participantRecords.length,
+            },
+            data: { participantCount: participantRecords.length },
+        });
+
         await this.coordinationPool.query(
             `UPDATE distributed_transactions SET status = 'aborting', global_decision = 'ABORT', decision_persisted_at = NOW(), updated_at = NOW() WHERE transaction_id = $1`,
             [transactionId],
@@ -522,7 +744,6 @@ export class DistributedTransactionCoordinator {
             txState.globalDecision = "ABORT";
         }
 
-        const participantRecords = await this.getDurableParticipants(transactionId);
         const abortErrors: Array<{ shardId: string; error: Error }> = [];
 
         for (const record of participantRecords) {
@@ -557,10 +778,27 @@ export class DistributedTransactionCoordinator {
                     });
                     continue;
                 }
+                const clientRef = client;
                 if (record.preparedTransactionId) {
-                    await client.query(`ROLLBACK PREPARED '${record.preparedTransactionId}'`);
+                    await this.retryPolicy.execute(async () => {
+                        await this.withTimeout(
+                            () => clientRef.query(`ROLLBACK PREPARED '${record.preparedTransactionId}'`),
+                            this.timeouts.abortTimeoutMs,
+                            "abort",
+                            transactionId,
+                            record.shardId,
+                        );
+                    });
                 } else {
-                    await client.query("ROLLBACK");
+                    await this.retryPolicy.execute(async () => {
+                        await this.withTimeout(
+                            () => clientRef.query("ROLLBACK"),
+                            this.timeouts.abortTimeoutMs,
+                            "abort",
+                            transactionId,
+                            record.shardId,
+                        );
+                    });
                 }
 
                 await this.coordinationPool.query(
@@ -568,6 +806,9 @@ export class DistributedTransactionCoordinator {
                     [transactionId, record.shardId],
                 );
             } catch (error) {
+                if (error instanceof DistributedTxTimeoutError) {
+                    throw error;
+                }
                 abortErrors.push({
                     shardId: record.shardId,
                     error: error instanceof Error ? error : new Error(String(error)),
@@ -596,6 +837,19 @@ export class DistributedTransactionCoordinator {
 
         if (abortErrors.length > 0) {
             const firstError = abortErrors[0];
+            await this.hookRunner.invoke("abortFailed", {
+                transactionId,
+                coordinator: {
+                    getCurrentState: () => "aborting",
+                    getCurrentTransactionId: () => transactionId,
+                    getParticipantCount: () => txState?.participants.size ?? 0,
+                },
+                data: {
+                    error: firstError.error,
+                    abortedCount: participantRecords.length - abortErrors.length,
+                    failedCount: abortErrors.length,
+                },
+            });
             throw new DistributedTransactionError(
                 `Global ABORT decision persisted but ${abortErrors.length} participant(s) failed to abort. First error on "${firstError.shardId}": ${firstError.error.message}. Recovery will retry.`,
                 transactionId,
@@ -607,6 +861,19 @@ export class DistributedTransactionCoordinator {
             { transactionId, coordinatorId: this.coordinatorId },
             "Distributed transaction aborted",
         );
+
+        const abortedCount = participantRecords.filter(
+            (r) => r.participantStatus === "aborted",
+        ).length;
+        await this.hookRunner.invoke("afterAbort", {
+            transactionId,
+            coordinator: {
+                getCurrentState: () => "aborted",
+                getCurrentTransactionId: () => transactionId,
+                getParticipantCount: () => participantRecords.length,
+            },
+            data: { abortedCount, durationMs: Date.now() - (txState?.startTime ?? 0) },
+        });
     }
 
     /**
@@ -740,7 +1007,15 @@ export class DistributedTransactionCoordinator {
                 }
                 const client = await pool.connect();
                 try {
-                    await client.query(`COMMIT PREPARED '${record.preparedTransactionId}'`);
+                await this.retryPolicy.execute(async () => {
+                    await this.withTimeout(
+                        () => client.query(`COMMIT PREPARED '${record.preparedTransactionId}'`),
+                        this.timeouts.commitTimeoutMs,
+                        "commit",
+                        transactionId,
+                        record.shardId,
+                    );
+                });
                 } finally {
                     client.release();
                 }
@@ -921,6 +1196,13 @@ export class DistributedTransactionCoordinator {
             aborted: metrics.aborted?.count ?? 0,
             oldestActiveAgeMs,
         };
+    }
+
+    get currentState(): string {
+        for (const [, txState] of this.activeTransactions) {
+            return txState.status;
+        }
+        return "active";
     }
 
     async shutdown(): Promise<void> {

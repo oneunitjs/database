@@ -74,14 +74,14 @@ This document outlines the implementation plan to address all missing features r
 ### 🔴 1.2 Distributed Transaction Timeout Configuration (Weeks 5-6)
 **Why:** Without timeouts, transactions can hang indefinitely.
 
-#### 1.2.1 Configurable Timeouts
+#### 1.2.1 Configurable Timeouts ✅ DONE
 - **Effort:** 3-4 days | **File:** `src/distributed-tx/distributed-transaction-coordinator.ts`
-- **Approach:** Add `prepareTimeoutMs`, `commitTimeoutMs`, `abortTimeoutMs`, `globalTimeoutMs`
+- **Approach:** Added `prepareTimeoutMs`, `commitTimeoutMs`, `abortTimeoutMs`, `globalTimeoutMs` via `DistributedTxTimeoutConfig` + `DEFAULT_DISTRIBUTED_TX_TIMEOUTS`
 - **Acceptance:** All phases have configurable timeouts, proper cleanup
 
-#### 1.2.2 Retry Policies
+#### 1.2.2 Retry Policies ✅ DONE
 - **Effort:** 3-4 days | **File:** `src/distributed-tx/retry-policy.ts`
-- **Approach:** Exponential backoff, configurable max retries, retryable error classification
+- **Approach:** `RetryPolicy` with exponential backoff, configurable max retries, retryable error classification (`defaultIsRetryable`)
 - **Acceptance:** Retry on transient errors only, no infinite loops
 
 ---
@@ -94,11 +94,11 @@ This document outlines the implementation plan to address all missing features r
 
 **Acceptance Criteria for Phase 1:**
 - [x] Failover layer functional with persistent state (all 9 features implemented)
-- [ ] Distributed transactions have proper timeout/retry handling
+- [x] Distributed transactions complete (timeout/retry, hooks, health checks, cleanup diagnostics - all 7 features)
 - [ ] Package maintains HA during primary failures
 - [ ] 100% test coverage for new features
 
-**Remaining Phase 1 work:** Distributed Transaction Timeout Configuration (1.2.1) and Retry Policies (1.2.2).
+**Remaining Phase 1 work:** HA during primary failures (integration testing in section 1.3).
 
 ---
 
@@ -159,7 +159,30 @@ All failover completion features were implemented ahead of schedule in Phase 1:
 - **Approach:** Interface: `FencingProvider`; Implementations: `AdvisoryLockFencingProvider`; Integration: Block writes during failover
 - **Acceptance:** Prevents writes during failover, token-based validation
 
-Phase 2 remaining work: **Distributed Transaction Timeout Configuration & Retry Policies** (1.2.1, 1.2.2).
+Phase 2 remaining work: **Distributed Transaction Layer Completion** (features 5-7: hooks, health checks, cleanup diagnostics).
+
+#### 2.2.5 Distributed Transaction Layer ✅ DONE
+All distributed transaction features were implemented:
+
+##### #1-4 Timeout Configuration & Retry Policies ✅ DONE (Phase 1)
+- **Files:** `src/distributed-tx/distributed-transaction-coordinator.ts`, `src/distributed-tx/retry-policy.ts`
+- **Approach:** `prepareTimeoutMs`, `commitTimeoutMs`, `abortTimeoutMs`, `globalTimeoutMs`; `RetryPolicy` with exponential backoff + jitter; `DistributedTxTimeoutError` with phase/shardId/timeoutMs; automatic abort on prepare timeout
+- **Acceptance:** All phases have configurable timeouts, retry on transient errors only, automatic abort
+
+##### #5 Transaction Lifecycle Hooks ✅ DONE (Phase 1)
+- **File:** `src/distributed-tx/distributed-tx-hooks.ts`
+- **Approach:** `DistributedTxHookRunner` with 16 hook types (before/after prepare/commit/abort, participant join/leave, state change, timeout); error-isolated dispatch
+- **Acceptance:** Hooks invoked at all lifecycle points, errors don't break operations, registration/unregistration
+
+##### #6 Participant Health Checks ✅ DONE (Phase 1)
+- **File:** `src/distributed-tx/participant-health.ts`
+- **Approach:** `ParticipantHealthChecker` with per-node health status, consecutive failure/success tracking, unhealthy duration, dynamic intervals
+- **Acceptance:** Health check execution, status tracking, integration ready
+
+##### #7 Transaction Cleanup Diagnostics ✅ DONE (Phase 1)
+- **Files:** `src/distributed-tx/prepared-transaction-scanner.ts`, `src/distributed-tx/cleanup-diagnostics.ts`
+- **Approach:** `PreparedTransactionScanner` (scans pg_prepared_xacts), `TransactionCleanupManager` (diagnose, cleanup orphaned/old transactions)
+- **Acceptance:** Scanner, cleanup manager, scan/diagnose, cleanup orphaned/old, recommendations
 
 ---
 
