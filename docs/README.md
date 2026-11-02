@@ -1,31 +1,92 @@
-<p align="center">
-  <strong>@oneunit/database</strong>
-  <br/>
-  A batteries-included PostgreSQL client for Node.js
-</p>
+# @oneunit/database
 
-<p align="center">
-  <a href="https://www.npmjs.com/@oneunit/database"><img src="https://img.shields.io/npm/v/@oneunit/database?color=0969da&label=npm" alt="npm version"></a>
-  <a href="https://github.com/oneunitjs/database/blob/main/packages/database/LICENSE"><img src="https://img.shields.io/npm/l/@oneunit/database?color=22863a" alt="license"></a>
-  <img src="https://img.shields.io/badge/node-%3E%3D20-417e38" alt="node version">
-  <img src="https://img.shields.io/badge/types-included-3178c6" alt="types included">
-</p>
+> **A batteries-included PostgreSQL client for Node.js applications, from simple CRUD services to distributed database deployments.**
 
-<p align="center">
-  Connection pooling · Parameterized queries · Transactions &amp; savepoints · Streaming &amp; cursors<br/>
-  Query builder · Models · Schema helpers · Migrations · Health checks · Metrics<br/>
-  Sharding · Replication · Online resharding · Distributed transactions · Failover
-</p>
+[![npm version](https://img.shields.io/npm/v/@oneunit/database?color=0969da&label=npm)](https://www.npmjs.com/package/@oneunit/database)
+[![license](https://img.shields.io/npm/l/@oneunit/database?color=22863a)](https://github.com/oneunitjs/database/blob/main/packages/database/LICENSE)
+![Node.js >= 20](https://img.shields.io/badge/node-%3E%3D20-417e38)
+![TypeScript types included](https://img.shields.io/badge/types-included-3178c6)
+
+`@oneunit/database` is a PostgreSQL client for Node.js built on top of [`pg`](https://node-postgres.com). It combines the everyday building blocks of database-backed applications—connection pooling, parameterized queries, transactions, schema management, and health checks—with optional capabilities for larger deployments, including read replicas, sharding, online resharding, distributed transactions, and failover integration.
+
+The package is designed around a single entry point, `createDatabase()`. You can begin with one PostgreSQL database and enable additional subsystems only when your architecture needs them. You do not need to adopt sharding, replication, or distributed transactions for a typical application.
+
+**What it provides**
+
+- **Connection lifecycle management:** pooled connections, optional validation, leak detection, health checks, and graceful shutdown.
+- **Safe query execution:** PostgreSQL parameter placeholders, SQL tagged templates, and a fluent query builder.
+- **Reliable units of work:** transactions, savepoints, configurable isolation, timeouts, and opt-in retry behavior.
+- **Application-level data helpers:** models, chunked batch operations, streaming, and cursors.
+- **Schema evolution:** schema helpers and versioned migrations.
+- **Horizontal and high-availability capabilities:** shard routing, primary/replica routing, schema synchronization, resharding, distributed transactions, and failover-provider integration.
+- **Observability:** lifecycle hooks, query instrumentation, health information, and metrics.
+
+Built on `pg`, with optional [`pg-cursor`](https://github.com/brianc/node-postgres-cursor) and [`pg-query-stream`](https://github.com/brianc/node-postgres-query-stream) integrations for cursor and stream workloads. The package ships as a standalone ESM package and includes TypeScript declarations.
+
+> **Repository:** [github.com/oneunitjs/database](https://github.com/oneunitjs/database)  
+> **Release notes:** See [CHANGELOG.md](CHANGELOG.md).  
+> **Architecture details:** See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
-Built on [`pg`](https://node-postgres.com), with optional [`pg-cursor`](https://github.com/brianc/node-pg-cursor) and [`pg-query-stream`](https://github.com/brianc/node-pg-query-stream) for streaming workloads. Ships as a standalone ESM package — no sibling-package runtime dependencies.
+## Who Should Use This Package?
 
-> **Monorepo** — [github.com/oneunitjs/database](https://github.com/oneunitjs/database)
+| Application type | Recommended starting point |
+| :--- | :--- |
+| Small API or service | Core client, parameterized queries, transactions, and health checks |
+| CRUD-heavy application | Add models, query builder, schema helpers, and migrations |
+| Import or analytics worker | Add batch inserts, streams, or cursors |
+| Read-heavy application | Add primary/replica routing and define consistency expectations |
+| Multi-tenant or high-volume system | Consider sharding after measuring single-database limits |
+| Multi-shard system requiring atomic writes | Evaluate distributed transactions and their operational requirements |
+| High-availability deployment | Integrate an external HA provider and configure failover behavior |
 
-> **Latest Release:** See [CHANGELOG.md](CHANGELOG.md) for recent changes.
+A single PostgreSQL database is usually the simplest and most maintainable choice. Sharding and distributed transactions introduce operational complexity; use them when there is a concrete scaling or consistency requirement rather than enabling them by default.
+
+## Core Concepts
+
+### Database instance
+
+Create a database instance with `createDatabase(config)`. It is the application-facing object that coordinates the connection pool and optional subsystems. In most services, create one instance during application startup, reuse it across requests, and close it during graceful shutdown.
+
+### Connection pool
+
+A pool reuses database connections instead of opening a new network connection for every query. The pool has configurable limits and timeouts. Queries issued through the normal `db.query()` API acquire and release a client automatically. If you manually acquire a client, release it in a `finally` block.
+
+### Parameterized SQL
+
+Pass data values as parameters (`$1`, `$2`, and so on), or interpolate values into the `sql` tagged template. Parameters keep values separate from SQL text and are the primary defense against SQL injection. Dynamic identifiers such as table or column names are not ordinary values; use the package's identifier helper or a strict allow-list.
+
+### Transactions and savepoints
+
+A transaction groups statements on one connection. The package commits when the callback completes successfully and rolls back when it throws. A savepoint lets part of a transaction fail and be rolled back while the outer transaction continues. A normal transaction is limited to one database connection (and one shard when sharding is enabled).
+
+### Models and query builder
+
+The query builder helps assemble dynamic SQL, while models provide table-oriented CRUD helpers. These are convenience layers over SQL, not a replacement for understanding indexes, constraints, query plans, or PostgreSQL behavior. Use raw parameterized SQL when it is clearer.
+
+### Replication
+
+A primary handles writes; replicas can serve reads. Replica reads may lag behind writes, so use the primary when a read must observe a recent write. Select a read preference deliberately instead of assuming every replica is immediately consistent.
+
+### Sharding
+
+Sharding partitions data across independent PostgreSQL databases. A shard key determines where a row or query is routed. Choosing a shard key is an application data-model decision: queries that do not include a usable key may require fan-out or a different access pattern.
+
+### Online resharding
+
+Resharding moves data between shards through a durable sequence of planning, copying, validation, cutover, and finalization. The cutover process uses write fencing to coordinate routing changes. Treat this as an operational migration: test it on representative data and monitor each phase.
+
+### Distributed transactions
+
+Two-phase commit (2PC) coordinates a transaction across multiple PostgreSQL servers. It provides stronger cross-shard atomicity but adds latency and operational requirements, including PostgreSQL prepared-transaction configuration and recovery procedures.
+
+---
 
 ## Table of Contents
+
+- [Who Should Use This Package?](#who-should-use-this-package)
+- [Core Concepts](#core-concepts)
 
 - [Architecture Overview](#architecture-overview)
 - [When to Use Which Features](#when-to-use-which-features)
@@ -515,7 +576,7 @@ The package has undergone significant stability and reliability improvements:
 
 ### 🛡️ Production Readiness
 
-- **Connection Leak Detection**: Automatic warnings after 5 minutes for unreleased connections (both manual and cursor-based)
+- **Connection Leak Auto-Release**: Leaked connections (both pool and manual) are automatically released after 5 minutes, with warnings logged
 - **Connection Validation**: Optional validation of connections on checkout to prevent stale connection errors
 - **Enhanced Health Checks**: Pool statistics now include `pendingAcquire` and `max` for better monitoring
 - **Smart Retry Logic**: Retries no longer trigger on pool exhaustion errors, preventing cascading failures
@@ -2966,6 +3027,8 @@ const db = createDatabase({
 
 **Problem:** Pool exhaustion errors (`POOL_EXHAUSTED`).
 
+**Note:** Since the recent fix, **leaked connections are automatically released after 5 minutes**, preventing indefinite memory leaks. However, you should still follow best practices to avoid leaks.
+
 **Diagnosis:**
 ```javascript
 // Check for leaked manual clients
@@ -2977,13 +3040,13 @@ const health = await db.check();
 console.log('Pool stats:', health.pool);
 ```
 
-**Solution:** Ensure all manual clients are released:
+**Solution:** Ensure all manual clients are released (best practice, even though auto-release is now in place):
 ```javascript
 const client = await db.getClient();
 try {
     await client.query('SELECT 1');
 } finally {
-    db.releaseClient(client); // Always release!
+    db.releaseClient(client); // Always release! (Auto-release after 5min is a safety net)
 }
 ```
 
@@ -3012,6 +3075,1067 @@ try {
 
 ---
 
+## Production Considerations
+
+> **IMPORTANT**: Before deploying to production, review this section carefully. It documents known limitations, requirements, and recommendations for production use.
+
+### Recently Fixed Issues
+
+The following **critical issues have been FIXED** in recent updates:
+
+#### ✅ FIXED: Auto-Release of Leaked Pool Connections
+
+**WHAT**: Leaked pool connections are now automatically released after the 5-minute timeout.
+
+**PREVIOUS BEHAVIOR**: Connections stayed checked out indefinitely; only a warning was logged.
+
+**CURRENT BEHAVIOR**: After 5 minutes, leaked connections are automatically released with an error, preventing memory leaks.
+
+**WHERE**: `src/client/pool.ts:28-33`
+
+**IMPACT**: Prevents unbounded memory growth from connection leaks in production.
+
+---
+
+#### ✅ FIXED: Auto-Release of Leaked Manual Clients
+
+**WHAT**: Manual clients acquired via `getClient()` are now automatically released after the 5-minute timeout.
+
+**PREVIOUS BEHAVIOR**: Manual clients stayed checked out indefinitely; only a warning was logged.
+
+**CURRENT BEHAVIOR**: After 5 minutes, leaked manual clients are automatically released with an error.
+
+**WHERE**: `src/client/client.ts:130-140`
+
+**IMPACT**: Prevents unbounded memory growth from manual client leaks in production.
+
+---
+
+#### ✅ FIXED: SQL Injection Prevention in Distributed Transactions (CRITICAL)
+
+**WHAT**: Prepared transaction IDs are now sanitized before being interpolated into SQL statements.
+
+**PREVIOUS BEHAVIOR**: Raw string interpolation: `PREPARE TRANSACTION '${preparedId}'` - **CRITICAL SECURITY VULNERABILITY (CWE-89)**
+
+**CURRENT BEHAVIOR**: Single quotes are escaped by doubling them: `preparedId.replace(/'/g, "''")` before interpolation.
+
+**WHERE**: `src/distributed-tx/distributed-transaction-coordinator.ts:394-400`
+
+**IMPACT**: **ELIMINATES CRITICAL SQL INJECTION VULNERABILITY** - Malicious transaction IDs can no longer execute arbitrary SQL.
+
+**CODE EXAMPLE**:
+```typescript
+// Sanitize preparedId to prevent SQL injection in PREPARE TRANSACTION
+// (PREPARE TRANSACTION does not support parameterized identifiers)
+const safePreparedId = `pg_${transactionId}_${shardId}`.replace(/'/g, "''");
+
+await client.query(`PREPARE TRANSACTION '${safePreparedId}'`);
+```
+
+---
+
+> **Note**: While these fixes address critical issues, please review the remaining [Known Limitations and Workarounds](#known-limitations-and-workarounds) below for other production considerations.
+
+### Prerequisites
+
+| **Requirement** | **Minimum Version** | **Recommended** | **Purpose** |
+|----------------|---------------------|-----------------|-------------|
+| **Node.js** | >= 20.0.0 | Latest LTS | Runtime environment |
+| **PostgreSQL** | >= 13.0 | Latest stable | Full feature support |
+| **Docker** | >= 20.10 | Latest | Integration tests (optional) |
+
+**Why Node.js 20+?**
+- Uses modern JavaScript features (ES2022+)
+- Better performance and security
+- Active LTS support
+
+**Why PostgreSQL 13+?**
+- `pg_last_xact_replay_timestamp()` for accurate replication lag (PG 13+)
+- Better advisory lock performance
+- Improved prepared transaction handling
+
+**Note**: Basic features (queries, transactions, simple sharding) work with PostgreSQL 10+, but advanced features require PG 13+.
+
+---
+
+### Required Configuration for Production
+
+#### 1. Connection Validation
+
+**WHAT**: Enable connection validation to prevent errors from stale connections.
+
+**WHY**: Connection pools can return stale connections that fail on first use, causing `ECONNRESET` errors.
+
+**WHERE**: Configuration option `validateConnections`
+
+**HOW**:
+```typescript
+import { createDatabase } from '@oneunit/database';
+
+const db = createDatabase({
+  validateConnections: true, // Enable validation
+});
+```
+
+**IMPACT**: Adds one extra `SELECT 1` query per connection on first use, but prevents connection errors.
+
+---
+
+#### 2. Query Timeout
+
+**WHAT**: Always set query timeout to prevent hung queries.
+
+**WHY**: Without timeout, queries can block indefinitely, exhausting connection pool.
+
+**WHERE**: Configuration option `queryTimeout`
+
+**HOW**:
+```typescript
+const db = createDatabase({
+  queryTimeout: 30000, // 30 seconds
+});
+```
+
+**RECOMMENDATION**: Set based on expected query duration (30s for most apps, 60-120s for analytics).
+
+---
+
+#### 3. Connection Pool Sizing
+
+**WHAT**: Configure pool size based on workload and database capacity.
+
+**WHY**: Default pool size may be too small or too large for your workload.
+
+**WHERE**: Environment variables or explicit config
+
+**HOW**:
+```bash
+# Environment variables
+PGPOOL_MAX=20          # Maximum connections
+PGPOOL_MIN=5           # Minimum idle connections
+PGPOOL_IDLE_TIMEOUT=30000 # Idle connection timeout (ms)
+```
+
+**RECOMMENDATIONS**:
+- **Web servers**: pool size = CPU cores × 2 (for async I/O)
+- **API servers**: pool size = max concurrent requests
+- **Workers**: pool size = concurrency level
+- **Database**: total connections < max_connections / 2 (leave room for other clients)
+
+---
+
+#### 4. Retry Configuration
+
+**WHAT**: Enable retry for transient errors to improve resilience.
+
+**WHY**: Network blips, deadlocks, and other transient errors should be retried automatically.
+
+**WHERE**: Configuration option `retry`
+
+**HOW**:
+```typescript
+const db = createDatabase({
+  retry: {
+    retries: 3,           // Max retry attempts
+    initialDelayMs: 100,  // First retry after 100ms
+    maxDelayMs: 5000,     // Max delay between retries
+    backoffMultiplier: 2, // Exponential backoff
+    jitter: 0.1,          // Add randomness to prevent thundering herd
+  },
+});
+```
+
+**RECOMMENDATION**: Use exponential backoff with jitter to prevent retry storms.
+
+---
+
+#### 5. Health Check Configuration
+
+**WHAT**: Configure health checks for monitoring.
+
+**WHY**: Health checks help monitor database connectivity and detect issues early.
+
+**WHERE**: Built-in health check API
+
+**HOW**:
+```typescript
+// Check database health
+const health = await db.check();
+// {
+//   status: 'up',
+//   latency: { value: 5, unit: 'ms' },
+//   pool: { total: 10, idle: 7, waiting: 0, max: 20 }
+// }
+
+// Use in health check endpoint
+app.get('/health', async (req, res) => {
+  try {
+    const health = await db.check();
+    res.status(200).json(health);
+  } catch (error) {
+    res.status(503).json({ status: 'down', error: error.message });
+  }
+});
+```
+
+---
+
+### Sharding Configuration
+
+#### Default Shard Required
+
+**WHAT**: Always explicitly set `defaultShardId` when sharding is enabled.
+
+**WHY**: Without explicit default, the system silently falls back to the first shard, causing potential data loss.
+
+**WHERE**: Sharding configuration
+
+**HOW**:
+```typescript
+const db = createDatabase({
+  sharding: {
+    enabled: true,
+    strategy: 'hash',
+    defaultShardId: 'shard-1', // REQUIRED: Explicit default
+    shards: [
+      { id: 'shard-1', connection: {...} },
+      { id: 'shard-2', connection: {...} },
+    ],
+  },
+});
+```
+
+**IMPACT**: Without `defaultShardId`, operations without a shard key will go to the first shard, which may not be the intended behavior.
+
+---
+
+#### Global Connection Limits
+
+**WHAT**: Manage total connections across all shards.
+
+**WHY**: Each shard creates its own connection pool, which can exhaust system resources.
+
+**WHERE**: Shard configuration
+
+**HOW**:
+```typescript
+const MAX_GLOBAL_CONNECTIONS = 100;
+const shardCount = 4;
+const shardMax = Math.floor(MAX_GLOBAL_CONNECTIONS / shardCount); // 25 per shard
+
+const db = createDatabase({
+  sharding: {
+    enabled: true,
+    shards: [
+      { id: 'shard-1', connection: { max: shardMax, ... } },
+      { id: 'shard-2', connection: { max: shardMax, ... } },
+      // ...
+    ],
+  },
+});
+```
+
+**RECOMMENDATION**: Total connections across all shards should be < database max_connections / 2.
+
+---
+
+### Cross-Shard Operations
+
+#### Use Distributed Transactions for Atomicity
+
+**WHAT**: The sharding API does NOT support cross-shard transactions.
+
+**WHY**: Cross-shard atomicity requires two-phase commit (2PC).
+
+**WHERE**: For operations spanning multiple shards
+
+**HOW**:
+```typescript
+// WRONG: This only works within a single shard
+await db.sharding.transaction('shard-1', async (tx) => {
+  await tx.query(...); // Only on shard-1
+});
+
+// RIGHT: Use distributed transactions for cross-shard
+await db.distributedTx.transaction(async (tx) => {
+  // tx automatically routes to appropriate shards
+  await tx.queryOnShard('shard-1', ...);
+  await tx.queryOnShard('shard-2', ...);
+  // Both operations are atomic
+});
+```
+
+**RECOMMENDATION**: Denormalize data where possible to avoid cross-shard operations. Use distributed transactions only when absolutely necessary due to their complexity and performance overhead.
+
+---
+
+### Distributed Transactions
+
+#### PostgreSQL Configuration
+
+**WHAT**: Configure PostgreSQL for prepared transactions.
+
+**WHY**: Distributed transactions use PostgreSQL's prepared transactions feature.
+
+**WHERE**: postgresql.conf
+
+**HOW**:
+```ini
+# REQUIRED for distributed transactions
+max_prepared_transactions = 100  # Must be > 0
+
+# RECOMMENDED for performance
+max_connections = 200
+shared_buffers = 4GB
+effective_cache_size = 12GB
+work_mem = 16MB
+maintenance_work_mem = 512MB
+```
+
+**IMPACT**: If `max_prepared_transactions = 0`, distributed transactions will fail with `MaxPreparedTransactionsError`.
+
+---
+
+#### Coordination Database
+
+**WHAT**: Deploy a dedicated coordination database for distributed transactions.
+
+**WHY**: The distributed transaction coordinator requires a PostgreSQL database to store transaction state.
+
+**WHERE**: Separate PostgreSQL instance
+
+**HOW**:
+```typescript
+const db = createDatabase({
+  distributedTx: {
+    coordinationPool: createPool({
+      connectionString: 'postgresql://coord-db:5432/coordination',
+    }),
+  },
+});
+```
+
+**RECOMMENDATIONS**:
+- Deploy coordination DB with high availability (Patroni, pg_auto_failover)
+- Use synchronous replication to at least 2 nodes
+- Monitor coordination DB health separately
+- Allocate dedicated resources (not shared with application DBs)
+- Set `max_prepared_transactions` appropriately
+
+---
+
+### Replication Configuration
+
+#### PostgreSQL Version Compatibility
+
+**WHAT**: Replication lag monitoring requires PostgreSQL 13+.
+
+**WHY**: Uses `pg_last_xact_replay_timestamp()` which was added in PG 13.
+
+**WHERE**: Replication manager
+
+**HOW - For PG 13+**:
+```typescript
+const db = createDatabase({
+  replication: {
+    enabled: true,
+    mode: 'replica-preferred',
+    // Uses pg_last_xact_replay_timestamp() automatically
+  },
+});
+```
+
+**HOW - For PG 10-12**:
+```typescript
+const db = createDatabase({
+  replication: {
+    enabled: true,
+    mode: 'replica-preferred',
+    lagQuery: "SELECT EXTRACT(EPOCH FROM (now() - (pg_last_xlog_replay_location() / 1000000))) * 1000 AS lag_ms",
+    // Uses alternative query for older PG
+  },
+});
+```
+
+---
+
+#### Lag Threshold
+
+**WHAT**: Set appropriate lag threshold for failover.
+
+**WHY**: Prevents reading from replicas that are too far behind the primary.
+
+**WHERE**: Replication configuration
+
+**HOW**:
+```typescript
+const db = createDatabase({
+  replication: {
+    enabled: true,
+    lagThresholdMs: 5000, // 5 seconds max lag
+    healthCheck: {
+      intervalMs: 10000, // Check every 10 seconds
+      timeoutMs: 2000,   // Health check timeout
+    },
+  },
+});
+```
+
+**RECOMMENDATION**: Set `lagThresholdMs` based on your application's consistency requirements (0-5000ms for most apps).
+
+---
+
+### Failover Configuration
+
+#### External HA Provider Required
+
+**WHAT**: Failover features require an external HA provider.
+
+**WHY**: The package delegates primary election to external systems (Patroni, pg_auto_failover).
+
+**WHERE**: Failover manager
+
+**HOW - With Patroni**:
+```typescript
+import { PatroniHaProvider } from '@oneunit/database/failover';
+
+const db = createDatabase({
+  failover: {
+    provider: new PatroniHaProvider({
+      endpoints: ['http://patroni1:8008', 'http://patroni2:8008'],
+    }),
+  },
+});
+```
+
+**HOW - With pg_auto_failover**:
+```typescript
+import { PgAutoFailoverHaProvider } from '@oneunit/database/failover';
+
+const db = createDatabase({
+  failover: {
+    provider: new PgAutoFailoverHaProvider({
+      directory: '/var/run/postgresql',
+    }),
+  },
+});
+```
+
+**RECOMMENDATION**: Deploy Patroni or pg_auto_failover for automatic failover. Without external HA provider, failover features will not work.
+
+---
+
+#### Connection Invalidation Grace Period
+
+**WHAT**: Configure grace period for connections in transactions during failover.
+
+**WHY**: After failover, connections in active transactions continue writing to the old primary.
+
+**WHERE**: Failover configuration
+
+**HOW**:
+```typescript
+const db = createDatabase({
+  failover: {
+    connectionTracker: {
+      cleanupIntervalMs: 60000,     // Cleanup check every 60s
+      maxIdleMs: 300000,            // Close idle connections after 5m
+      gracePeriodMs: 30000,         // Allow 30s for in-transaction connections
+    },
+  },
+});
+```
+
+**RECOMMENDATION**: Set `gracePeriodMs` based on your longest-running transactions. Connections still in transactions after grace period should be force-closed.
+
+---
+
+### Monitoring and Observability
+
+#### Metrics Collection
+
+**WHAT**: Collect and export metrics for monitoring.
+
+**WHY**: Essential for production monitoring, alerting, and capacity planning.
+
+**WHERE**: Hooks and metrics API
+
+**HOW**:
+```typescript
+import { createHooks } from '@oneunit/database';
+
+const metrics = {
+  queryCount: 0,
+  queryDuration: 0,
+  errors: 0,
+};
+
+const hooks = createHooks({
+  beforeQuery: (query) => {
+    query.startTime = Date.now();
+  },
+  afterQuery: (query, result, duration) => {
+    metrics.queryCount++;
+    metrics.queryDuration += duration;
+  },
+  onError: (error) => {
+    metrics.errors++;
+    // Log to monitoring system
+    console.error('Database error:', error);
+  },
+});
+
+const db = createDatabase({ hooks });
+```
+
+**RECOMMENDATION**: Export metrics to Prometheus, Datadog, or your preferred monitoring system.
+
+---
+
+#### Logging
+
+**WHAT**: Configure appropriate logging level for production.
+
+**WHY**: Debug logs can be verbose and impact performance; error logs should be comprehensive.
+
+**WHERE**: Logger configuration
+
+**HOW**:
+```typescript
+import { createLogger } from '@oneunit/database';
+
+const logger = createLogger({
+  level: 'info', // 'error' for production, 'debug' for development
+  format: 'json', // JSON format for log aggregation
+  // Custom transport for your logging system
+});
+
+const db = createDatabase({ logger });
+```
+
+**RECOMMENDATIONS**:
+- **Production**: `level: 'info'` or `level: 'warn'`
+- **Development**: `level: 'debug'`
+- **Debugging**: `level: 'trace'` (temporarily)
+- **Format**: JSON for log aggregation systems
+
+---
+
+### Security Considerations
+
+#### SSL/TLS Configuration
+
+**WHAT**: Always use SSL/TLS for connections in production.
+
+**WHY**: Unencrypted connections can be intercepted, exposing credentials and data.
+
+**WHERE**: Connection configuration
+
+**HOW**:
+```typescript
+const db = createDatabase({
+  connection: {
+    ssl: {
+      rejectUnauthorized: true, // Verify server certificate
+      ca: fs.readFileSync('/path/to/ca.crt'), // CA certificate
+    },
+  },
+});
+```
+
+**RECOMMENDATION**: Use `rejectUnauthorized: true` in production to prevent MITM attacks.
+
+---
+
+#### Credential Management
+
+**WHAT**: Never hardcode credentials; use environment variables or secret management.
+
+**WHY**: Hardcoded credentials can be committed to version control.
+
+**WHERE**: Connection configuration
+
+**HOW**:
+```bash
+# Environment variables (recommended)
+PGHOST=db.example.com
+PGPORT=5432
+PGDATABASE=myapp
+PGUSER=app_user
+PGPASSWORD=secret_password
+
+# Or use a secrets manager
+import { getSecret } from '@aws-sdk/client-secrets-manager';
+
+const password = await getSecret('db-password');
+```
+
+**RECOMMENDATION**: Use Kubernetes Secrets, AWS Secrets Manager, HashiCorp Vault, or similar for production.
+
+---
+
+### Known Limitations and Workarounds
+
+> **CRITICAL**: Review this section before production deployment.
+
+#### 1. SQL Injection in Distributed Transactions (CRITICAL)
+
+**WHAT**: Prepared transaction IDs are vulnerable to SQL injection.
+
+**WHERE**: `src/distributed-tx/distributed-transaction-coordinator.ts`
+
+**IMPACT**: **CRITICAL SECURITY VULNERABILITY** - Malicious transaction IDs can execute arbitrary SQL.
+
+**STATUS**: ✅ **FIXED** - Single quotes are now escaped by doubling them before interpolation.
+
+**WORKAROUND**: No longer needed - the fix is in place.
+
+**PREVIOUS WORKAROUND** (for reference):
+```typescript
+// Previously required validation
+function isValidTransactionId(id: string): boolean {
+  return /^[a-zA-Z0-9_-]{1,64}$/.test(id);
+}
+```
+
+---
+
+#### 2. No Automatic Cleanup of Orphaned Prepared Transactions
+
+**WHAT**: Failed prepared transactions are not automatically cleaned up.
+
+**WHERE**: Distributed transaction coordinator
+
+**IMPACT**: Can exhaust `max_prepared_transactions`, blocking new distributed transactions.
+
+**WORKAROUND**:
+```typescript
+// Implement periodic cleanup
+setInterval(async () => {
+  const result = await pool.query(
+    "SELECT prepared_transaction_id FROM distributed_transaction_participants WHERE participant_status = 'prepared' AND prepared_at < NOW() - INTERVAL '5 minutes'"
+  );
+  for (const row of result.rows) {
+    await pool.query(`ROLLBACK PREPARED '${row.prepared_transaction_id}'`);
+  }
+}, 300000); // Every 5 minutes
+```
+
+---
+
+#### 3. Hardcoded Timeouts
+
+**WHAT**: Connection leak detection (5m), cursor timeout (5m), and other timeouts are hardcoded.
+
+**WHERE**: Various modules
+
+**IMPACT**: Cannot tune for different workloads.
+
+**WORKAROUND**: Fork and modify, or implement wrapper with configurable timeouts.
+
+---
+
+#### 4. No Cross-Shard Transactions in Sharding API
+
+**WHAT**: Sharding API only supports single-shard transactions.
+
+**WHERE**: `src/database.ts`
+
+**IMPACT**: Cannot perform atomic operations across shards using sharding API.
+
+**WORKAROUND**: Use `db.distributedTx.transaction()` for cross-shard operations.
+
+---
+
+#### 5. External HA Provider Required for Failover
+
+**WHAT**: Failover features require external HA infrastructure.
+
+**WHERE**: Failover manager
+
+**IMPACT**: Cannot use failover without Patroni or similar.
+
+**WORKAROUND**: Deploy with Patroni, pg_auto_failover, or implement custom HA provider.
+
+---
+
+#### 6. Global State Retention Prevents Garbage Collection
+
+**WHAT**: Module-level Maps/Sets retain references to connections and clients without cleanup on shutdown.
+
+**WHERE**: `src/client/pool.ts:13`, `src/client/client.ts:38`
+
+**WHY**: Tracking collections are module-level variables that persist for the lifetime of the application.
+
+**IMPACT**: Prevents garbage collection of released connections, causing memory leaks in long-running applications.
+
+**WORKAROUND**: Manually clear collections on shutdown or use WeakRef/WeakMap.
+
+---
+
+#### 7. Timer Accumulation Keeps Process Alive
+
+**WHAT**: Background timers are not marked with `.unref()` by default, preventing Node.js process exit.
+
+**WHERE**: `src/distributed-tx/distributed-transaction-coordinator.ts:227` (only this one uses unref)
+
+**WHY**: Most timers keep the event loop active.
+
+**IMPACT**: Node.js process will not exit gracefully when idle, consuming resources unnecessarily.
+
+**WORKAROUND**: Manually call `.unref()` on all timers or add `unref: boolean` option to timer-based features.
+
+---
+
+#### 8. Cursor Timeouts Hardcoded
+
+**WHAT**: Cursor implementations use hardcoded 5-minute and 30-second timeout values that cannot be configured.
+
+**WHERE**: `src/client/cursor.ts:16-17`
+
+**WHY**: Timeout constants are defined directly in the cursor source code.
+
+**IMPACT**: Cannot tune cursor timeouts for different workloads.
+
+**WORKAROUND**: Fork and modify cursor timeout constants, or expose as configurable options.
+
+---
+
+#### 9. No Global Connection Limit
+
+**WHAT**: Each shard creates its own `pg.Pool` with no enforcement of global connection limits across all shards.
+
+**WHERE**: `src/sharding/shard-manager.ts:180-190`
+
+**WHY**: ShardManager creates independent pools without considering total system resources.
+
+**IMPACT**: With N shards each with max M connections, total connections can reach N*M, potentially exhausting system resources.
+
+**WORKAROUND**: Manually configure each shard's pool max to ensure total < system limit, or implement global connection budget.
+
+---
+
+#### 10. No Participant Validation
+
+**WHAT**: Only the coordinator checks `max_prepared_transactions`; individual participants are not validated.
+
+**WHERE**: `src/distributed-tx/distributed-transaction-coordinator.ts:206-214`
+
+**WHY**: Check is only performed at coordinator initialization, not when adding participants.
+
+**IMPACT**: Participants without prepared transaction support can cause distributed transaction failures.
+
+**WORKAROUND**: Manually verify all participants support prepared transactions, or add validation when adding to transaction.
+
+---
+
+#### 11. No Automatic Recovery
+
+**WHAT**: In-flight distributed transactions are lost on coordinator crash; recovery only handles durably recorded transactions.
+
+**WHERE**: `src/distributed-tx/distributed-transaction-coordinator.ts:400-450`
+
+**WHY**: Recovery mechanism doesn't automatically detect and clean up in-flight transactions.
+
+**IMPACT**: After coordinator restart, in-flight transactions may leave prepared transactions orphaned, consuming slots.
+
+**WORKAROUND**: Implement periodic cleanup of orphaned prepared transactions using `pg_prepared_xacts`.
+
+---
+
+#### 12. Hardcoded Default Shard Selection
+
+**WHAT**: When `defaultShardId` is not configured, the system silently falls back to the first shard.
+
+**WHERE**: `src/database.ts:78-86`
+
+**WHY**: The code emits a `console.warn` but continues with implicit behavior.
+
+**IMPACT**: Inconsistent routing, potential data loss if operations are routed to wrong shard.
+
+**WORKAROUND**: Always explicitly set `defaultShardId` when sharding is enabled.
+
+---
+
+#### 13. Mutex Not Async-Safe
+
+**WHAT**: Simple promise queue implementation may have race conditions under concurrent access.
+
+**WHERE**: `src/sharding/shard-manager.ts:72-88`
+
+**WHY**: Not using proper async synchronization primitives.
+
+**IMPACT**: Race conditions in shard routing, potential data corruption.
+
+**WORKAROUND**: Use serialized access patterns or replace with proper async mutex implementation (e.g., async-mutex library).
+
+---
+
+#### 14. Sharding Validation Only at Startup
+
+**WHAT**: Runtime configuration changes are not re-validated; validation only occurs in constructor.
+
+**WHERE**: `src/database.ts:230-280`, `src/sharding/shard-manager.ts:40-70`
+
+**WHY**: Validation logic is tightly coupled to initialization.
+
+**IMPACT**: Configuration errors introduced at runtime go undetected until they cause failures.
+
+**WORKAROUND**: Restart application after configuration changes, or extract validation to reusable function.
+
+---
+
+#### 15. Health Check Intervals Hardcoded
+
+**WHAT**: Health check intervals (5s, 30s) are hardcoded constants that cannot be configured.
+
+**WHERE**: `src/failover/failover-manager.ts:95-105`, `src/replication/replication-manager.ts:17-25`
+
+**WHY**: Interval values are defined as constants in the source code.
+
+**IMPACT**: Cannot tune health check frequency for different production environments.
+
+**WORKAROUND**: Fork and modify interval constants, or expose as configurable options.
+
+---
+
+#### 16. Connection Invalidation is Best-Effort
+
+**WHAT**: `invalidateConnections()` only closes idle connections; connections currently in transactions are left open.
+
+**WHERE**: `src/failover/connection-tracker.ts:175-195`
+
+**WHY**: Design choice to avoid aborting in-flight transactions.
+
+**IMPACT**: After failover, existing transactions continue writing to the old primary until they complete.
+
+**WORKAROUND**: Set appropriate transaction timeouts at application level and implement connection force-close after grace period.
+
+---
+
+#### 17. Replication Lag Query Incompatible with PostgreSQL < 13
+
+**WHAT**: The default lag query uses `pg_last_xact_replay_timestamp()` which is only available in PostgreSQL 13+.
+
+**WHERE**: `src/replication/replication-manager.ts:17-18`
+
+**WHY**: The query is hardcoded and doesn't check PostgreSQL version.
+
+**IMPACT**: Replication lag monitoring will fail with PostgreSQL 12 or earlier.
+
+**WORKAROUND**: Use version-appropriate query based on PostgreSQL version.
+
+---
+
+#### 18. No Feature Detection
+
+**WHAT**: No runtime PostgreSQL version check; features are used without checking availability.
+
+**WHERE**: Throughout `src/distributed-tx/`, `src/failover/`, `src/resharding/`
+
+**WHY**: Feature detection is not implemented.
+
+**IMPACT**: Feature usage may fail on older PostgreSQL versions without clear error messages.
+
+**WORKAROUND**: Document PostgreSQL version requirements and implement feature detection on startup.
+
+---
+
+#### 19. Retry Not Enabled by Default
+
+**WHAT**: Query retry is **opt-in** and disabled by default, even for transient errors.
+
+**WHERE**: `src/client/client.ts:101-102`, `src/client/retry.ts`
+
+**WHY**: Design choice to maintain deterministic behavior by default.
+
+**IMPACT**: Transient errors cause immediate query failure, reducing application resilience.
+
+**WORKAROUND**: Enable retry in production configuration with reasonable retry policy.
+
+---
+
+#### 20. No Default Query Timeout
+
+**WHAT**: Query timeouts are **not set by default**; the default is `0` (no timeout).
+
+**WHERE**: `src/client/client.ts:101-102`
+
+**WHY**: Design choice to not change default pg behavior.
+
+**IMPACT**: Long-running queries can hang indefinitely, blocking connection pool slots.
+
+**WORKAROUND**: Always set query timeout in production configuration.
+
+---
+
+#### 21. Circuit Breaker Only Monitors Pool Exhaustion
+
+**WHAT**: The `CircuitBreaker` only checks `PoolMonitor` state (connection pool exhaustion), not actual query failures.
+
+**WHERE**: `src/distributed-tx/circuit-breaker.ts:40-55`
+
+**WHY**: The design focuses on pool-level health rather than query-level health.
+
+**IMPACT**: Circuit won't open for repeated query failures, only for connection exhaustion.
+
+**WORKAROUND**: Extend circuit breaker to track query failures.
+
+---
+
+#### 22. Error Normalization Loses Type
+
+**WHAT**: Original error type is lost when wrapped in `DatabaseError`; only error message and code are preserved.
+
+**WHERE**: `src/client/errors.ts:140-175`
+
+**WHY**: The error normalization process creates a consistent `DatabaseError` interface.
+
+**IMPACT**: Debugging is harder as stack traces and error types from underlying libraries are lost.
+
+**WORKAROUND**: Preserve original error as a property on the normalized error.
+
+---
+
+#### 23. Test Containers Dependency
+
+**WHAT**: Integration tests require Docker to be installed and running.
+
+**WHERE**: `package.json`, `test/integration/`
+
+**WHY**: Integration tests use testcontainers to spin up real PostgreSQL instances.
+
+**IMPACT**: Cannot run integration tests without Docker.
+
+**WORKAROUND**: Skip integration tests without Docker or use optional peer dependency pattern.
+
+---
+
+### Performance Tuning
+
+#### Connection Pool
+
+| **Parameter** | **Recommended Value** | **Description** |
+|---------------|----------------------|-----------------|
+| `max` | CPU cores × 2 | Maximum connections |
+| `min` | max / 4 | Minimum idle connections |
+| `idleTimeoutMillis` | 30000 | Close idle connections after N ms |
+| `connectionTimeoutMillis` | 5000 | Timeout for new connections |
+
+#### Query Execution
+
+| **Parameter** | **Recommended Value** | **Description** |
+|---------------|----------------------|-----------------|
+| `queryTimeout` | 30000 | Query timeout (ms) |
+| `statement_timeout` | 30000 | PostgreSQL statement timeout |
+| `lock_timeout` | 5000 | Lock timeout (ms) |
+
+#### Retry
+
+| **Parameter** | **Recommended Value** | **Description** |
+|---------------|----------------------|-----------------|
+| `retries` | 3 | Maximum retry attempts |
+| `initialDelayMs` | 100 | Initial delay before first retry |
+| `maxDelayMs` | 5000 | Maximum delay between retries |
+| `backoffMultiplier` | 2 | Multiplier for exponential backoff |
+| `jitter` | 0.1 | Random jitter factor |
+
+---
+
+### Deployment Checklist
+
+- [ ] **Environment**: Node.js >= 20, PostgreSQL >= 13
+- [ ] **Configuration**: Connection validation enabled
+- [ ] **Timeouts**: Query timeout set (30-120s)
+- [ ] **Pool**: Appropriate pool size configured
+- [ ] **Retry**: Retry enabled with backoff
+- [ ] **SSL**: Encrypted connections configured
+- [ ] **Credentials**: Using environment variables or secrets manager
+- [ ] **Sharding**: defaultShardId explicitly set (if sharding)
+- [ ] **Distributed TX**: Coordination DB deployed with HA (if used)
+- [ ] **Replication**: PostgreSQL version compatible (if used)
+- [ ] **Failover**: External HA provider deployed (if used)
+- [ ] **Monitoring**: Health checks, metrics, logging configured
+- [ ] **Backups**: Regular backups configured
+- [ ] **Testing**: Production-like tests passed
+
+---
+
+### Troubleshooting Guide
+
+#### Connection Pool Exhaustion
+
+**SYMPTOM**: `POOL_EXHAUSTED` errors, queries hanging
+
+**CAUSE**: Too many concurrent queries, long-running queries, connection leaks
+
+**SOLUTION**:
+1. Check pool metrics: `await db.check()`
+2. Increase pool size if needed
+3. Set query timeout to prevent long-running queries
+4. Enable connection validation
+5. Check for connection leaks (enable leak detection)
+
+---
+
+#### Distributed Transaction Failures
+
+**SYMPTOM**: `MaxPreparedTransactionsError`, prepared transaction errors
+
+**CAUSE**: PostgreSQL `max_prepared_transactions` exhausted
+
+**SOLUTION**:
+1. Increase `max_prepared_transactions` in postgresql.conf
+2. Implement cleanup of orphaned prepared transactions
+3. Check for failed transactions that weren't cleaned up
+4. Reduce concurrent distributed transactions
+
+---
+
+#### Failover Not Triggering
+
+**SYMPTOM**: Failover doesn't happen when primary fails
+
+**CAUSE**: 
+- External HA provider not configured
+- Health checks failing
+- Lag threshold not exceeded
+
+**SOLUTION**:
+1. Verify HA provider is running and configured
+2. Check health check logs
+3. Verify replication lag is within threshold
+4. Check failover manager logs for errors
+
+---
+
+#### Memory Leaks
+
+**SYMPTOM**: Process memory grows over time, never decreases
+
+**CAUSE**: Connection leaks, unreleased resources, global state accumulation
+
+**SOLUTION**:
+1. Enable connection leak detection
+2. Check for unreleased clients (use `db.getActiveManualClientCount()`)
+3. Review cursor usage (ensure cursors are closed)
+4. Check for global state retention (consider restarting process periodically)
+5. Use memory profiling tools to identify leaks
+
+---
+
+## Contributing
+
+Bug reports, feature requests, and pull requests are welcome on [GitHub](https://github.com/oneunitjs/database).
+
+When reporting issues:
+1. Include the version of `@oneunit/database`, Node.js, and PostgreSQL
+2. Provide a minimal reproduction
+3. Include relevant configuration and logs
+4. Specify if the issue occurs in development or production
+
+---
+
 ## License
 
-[MIT](LICENSE) © 2026 mayank# database
+[MIT](LICENSE) © 2026 mayank

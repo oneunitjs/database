@@ -358,6 +358,678 @@ const cursor = await db.cursor(query);
 
 ---
 
+## Production Limitations and Mitigations
+
+> **IMPORTANT**: This section documents all known production limitations, their root causes, impact, and recommended mitigations. Each limitation is explained with the **What, Why, Where, and How** framework.
+
+---
+
+### 1. Memory and Resource Management
+
+#### 1.1 Connection Leak Detection Timeout is Hardcoded
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Connection leak detection uses a hardcoded 5-minute timeout that cannot be configured |
+| **Why** | The timeout is defined as a constant (`CONNECTION_VALIDATION_TIMEOUT = 300000`) in the source code, making it inflexible for different production environments |
+| **Where** | `src/client/pool.ts:15`, `src/client/client.ts:48` |
+| **Impact** | In high-throughput systems, 5 minutes may be too long to detect leaks; in low-traffic systems, legitimate long-running operations might trigger false positives |
+| **How to Mitigate** | **Short-term**: Fork and modify the constant. **Long-term**: Expose this as a configurable option in `createPool()` and `createClient()` |
+| **Code Example - Current** | ```typescript
+const CONNECTION_VALIDATION_TIMEOUT = 300000; // Hardcoded 5 minutes
+``` |
+| **Code Example - Fix** | ```typescript
+interface PoolOptions {
+  connectionLeakTimeoutMs?: number; // Default: 300000
+}
+function createPool(options: PoolOptions = {}) {
+  const timeout = options.connectionLeakTimeoutMs ?? 300000;
+  // ... rest of implementation
+}
+``` |
+| **Priority** | HIGH - Critical for long-running applications |
+| **Production Risk** | Memory bloat from undetected connection leaks |
+| **Status** | ✅ **PARTIALLY FIXED** - Auto-release now prevents indefinite leaks, but timeout is still hardcoded |
+
+#### 1.2 Global State Retention Prevents Garbage Collection
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Multiple global `Map` and `Set` objects retain references to connections and clients without cleanup on shutdown |
+| **Why** | The tracking collections (`activeConnections`, `manualClients`) are module-level variables that persist for the lifetime of the application |
+| **Where** | `src/client/pool.ts:13` (`activeConnections` Set), `src/client/client.ts:38` (`manualClients` Set) |
+| **Impact** | Prevents garbage collection of released connections, causing memory leaks in long-running applications |
+| **How to Mitigate** | **Short-term**: Manually clear collections on shutdown. **Long-term**: Use WeakRef/WeakMap or implement proper cleanup hooks |
+| **Code Example - Current** | ```typescript
+const activeConnections = new Set<PoolClient>(); // Never cleared
+``` |
+| **Code Example - Fix** | ```typescript
+const activeConnections = new Set<PoolClient>();
+export function clearConnectionTracking() {
+  activeConnections.clear();
+}
+// Call during shutdown
+app.on('shutdown', clearConnectionTracking);
+``` |
+| **Priority** | HIGH - Memory leak risk |
+| **Production Risk** | Unbounded memory growth |
+| **Status** | ✅ **PARTIALLY FIXED** - Manual clients are now auto-released, but global Sets still retain references |
+
+#### 1.3 Timer Accumulation Keeps Process Alive
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Background timers (health checks, cleanup, recovery workers) are not marked with `.unref()` by default, preventing Node.js process exit |
+| **Why** | Only the recovery timer in distributed transaction coordinator uses `.unref()`. Other timers keep the event loop active |
+| **Where** | `src/distributed-tx/distributed-transaction-coordinator.ts:227` (only this one uses unref) |
+| **Impact** | Node.js process will not exit gracefully when idle, consuming resources unnecessarily |
+| **How to Mitigate** | **Short-term**: Manually call `.unref()` on all timers. **Long-term**: Add `unref: boolean` option to all timer-based features |
+| **Code Example - Current** | ```typescript
+this.healthCheckTimer = setInterval(() => this.checkAll(), intervalMs);
+``` |
+| **Code Example - Fix** | ```typescript
+const timer = setInterval(() => this.checkAll(), intervalMs);
+if (options.unref !== false) timer.unref();
+``` |
+| **Priority** | MEDIUM - Process lifecycle issue |
+| **Production Risk** | Resource wastage, zombie processes |
+
+#### 1.4 Cursor Timeouts Hardcoded
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Cursor implementations use hardcoded 5-minute and 30-second timeout values that cannot be configured |
+| **Why** | Timeout constants are defined directly in the cursor source code |
+| **Where** | `src/client/cursor.ts:16-17` |
+| **Impact** | Cannot tune cursor timeouts for different workloads; 5-minute timeout may be too short or too long depending on use case |
+| **How to Mitigate** | **Short-term**: Fork and modify cursor timeout constants. **Long-term**: Expose cursor timeouts as configurable options in cursor creation |
+| **Code Example - Current** | ```typescript
+const CURSOR_TIMEOUT_MS = 300000; // Hardcoded 5 minutes
+const CURSOR_READ_TIMEOUT_MS = 30000; // Hardcoded 30 seconds
+``` |
+| **Code Example - Fix** | ```typescript
+interface CursorOptions {
+  timeoutMs?: number; // Default: 300000
+  readTimeoutMs?: number; // Default: 30000
+}
+function createCursor(query: string, options: CursorOptions = {}) {
+  const timeout = options.timeoutMs ?? 300000;
+  const readTimeout = options.readTimeoutMs ?? 30000;
+  // ... rest of implementation
+}
+``` |
+| **Priority** | MEDIUM - Flexibility issue |
+| **Production Risk** | Suboptimal cursor behavior for certain workloads |
+
+#### 1.5 No Global Connection Pool Limit
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Each shard creates its own `pg.Pool` with no enforcement of global connection limits across all shards |
+| **Why** | ShardManager creates independent pools for each shard without considering the total system resources |
+| **Where** | `src/sharding/shard-manager.ts:180-190` |
+| **Impact** | With N shards each with max M connections, total connections can reach N*M, potentially exhausting system resources |
+| **How to Mitigate** | **Short-term**: Manually configure each shard's pool max to ensure total < system limit. **Long-term**: Implement global connection budget and fair distribution |
+| **Code Example - Current** | ```typescript
+const pool = new Pool(shard.connection); // No global limit
+``` |
+| **Code Example - Fix** | ```typescript
+class GlobalConnectionManager {
+  private maxGlobalConnections: number;
+  createShardPool(config: PoolConfig): Pool {
+    const shardMax = Math.floor(this.maxGlobalConnections / this.shardCount);
+    return new Pool({ ...config, max: shardMax });
+  }
+}
+``` |
+| **Priority** | HIGH - Resource exhaustion risk |
+| **Production Risk** | System instability from too many connections |
+
+---
+
+### 2. Distributed Transaction Limitations
+
+#### 2.1 SQL Injection Vulnerability in Prepared Transaction IDs
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Prepared transaction IDs are constructed using string interpolation without escaping single quotes |
+| **Why** | The code uses template literals to construct SQL: `PREPARE TRANSACTION '${preparedId}'` |
+| **Where** | `src/distributed-tx/distributed-transaction-coordinator.ts:320` and multiple other locations |
+| **Impact** | **CRITICAL SECURITY VULNERABILITY**: Malicious shard IDs or transaction IDs containing single quotes can break out of the string literal and execute arbitrary SQL |
+| **How to Mitigate** | **IMMEDIATE**: Use PostgreSQL's `quote_literal()` function or validate/sanitize all transaction IDs. **Long-term**: Use parameterized queries (PG 14+) |
+| **Code Example - Current** | ```typescript
+await client.query(`PREPARE TRANSACTION '${preparedId}'`);
+``` |
+| **Code Example - Fix** | ```typescript
+// Option 1: Validate ID format (RECOMMENDED)
+function validateTransactionId(id: string): boolean {
+  return /^[a-zA-Z0-9_-]+$/.test(id);
+}
+// Option 2: Use quote_literal
+await client.query(`PREPARE TRANSACTION ${quoteLiteral(preparedId)}`);
+``` |
+| **Priority** | **CRITICAL** - Security vulnerability |
+| **Production Risk** | **SQL injection attacks, data breach** |
+| **CWE** | CWE-89: SQL Injection |
+| **Status** | ✅ **FIXED** - Single quotes are now escaped by doubling them |
+
+#### 2.2 Orphaned Prepared Transactions Block New Transactions
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | When prepared transactions timeout during the prepare phase, they are not automatically cleaned up, consuming PostgreSQL's `max_prepared_transactions` slots |
+| **Why** | The code catches prepare errors but does not issue ROLLBACK PREPARED for failed participants |
+| **Where** | `src/distributed-tx/distributed-transaction-coordinator.ts:350-380` |
+| **Impact** | Eventually exhausts `max_prepared_transactions`, blocking all new distributed transactions |
+| **How to Mitigate** | **Short-term**: Implement cleanup in error handler. **Long-term**: Add automatic timeout and cleanup for prepared transactions |
+| **Code Example - Fix** | ```typescript
+catch (error) {
+  try {
+    await client.query(`ROLLBACK PREPARED '${preparedId}'`);
+  } catch (rollbackError) {
+    logger.warn({ err: rollbackError }, 'Failed to rollback prepared transaction');
+  }
+  prepareErrors.push({ shardId, error });
+}
+``` |
+| **Priority** | HIGH - Resource exhaustion |
+| **Production Risk** | Distributed transactions become unavailable |
+
+#### 2.3 Coordination Database is Single Point of Failure
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Distributed transaction coordinator requires a separate PostgreSQL database to store transaction state and coordination data |
+| **Why** | The design uses a coordination database to persist transaction state durably across restarts |
+| **Where** | `src/distributed-tx/distributed-transaction-coordinator.ts:62-68` |
+| **Impact** | If the coordination database fails, distributed transactions cannot start, commit, or recover |
+| **How to Mitigate** | **Deploy coordination DB with high availability**: Use Patroni or pg_auto_failover with synchronous replication to at least 2 nodes. Monitor coordination DB health separately. |
+| **Priority** | HIGH - Availability risk |
+| **Production Risk** | Distributed transactions unavailable during coordination DB outage |
+
+#### 2.4 No Participant Validation
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Only the coordinator checks `max_prepared_transactions`; individual participants are not validated before being added to a distributed transaction |
+| **Why** | The check for `max_prepared_transactions > 0` is only performed at coordinator initialization, not when adding participants |
+| **Where** | `src/distributed-tx/distributed-transaction-coordinator.ts:206-214` |
+| **Impact** | Participants without prepared transaction support can cause distributed transaction failures at prepare time |
+| **How to Mitigate** | **Short-term**: Manually verify all participants support prepared transactions. **Long-term**: Add participant validation when adding to transaction |
+| **Code Example - Current** | ```typescript
+// Only checks coordinator
+if (maxPreparedTransactions <= 0) {
+  throw new MaxPreparedTransactionsError();
+}
+``` |
+| **Code Example - Fix** | ```typescript
+async function validateParticipant(client: PoolClient): Promise<boolean> {
+  const result = await client.query("SHOW max_prepared_transactions");
+  return parseInt(result.rows[0].max_prepared_transactions) > 0;
+}
+``` |
+| **Priority** | MEDIUM - Configuration validation |
+| **Production Risk** | Distributed transaction failures due to participant incompatibility |
+
+#### 2.5 No Automatic Recovery
+
+| **Aspect** | **Details** |
+| **What** | In-flight distributed transactions are lost on coordinator crash; recovery only handles durably recorded transactions |
+| **Why** | The recovery mechanism doesn't automatically detect and clean up in-flight transactions that weren't durably recorded |
+| **Where** | `src/distributed-tx/distributed-transaction-coordinator.ts:400-450` |
+| **Impact** | After coordinator restart, in-flight transactions may leave prepared transactions orphaned, consuming slots |
+| **How to Mitigate** | **Short-term**: Implement periodic cleanup of orphaned prepared transactions using `pg_prepared_xacts`. **Long-term**: Implement comprehensive recovery that detects and recovers in-flight transactions |
+| **Code Example - Fix** | ```typescript
+// Periodic cleanup of orphaned prepared transactions
+setInterval(async () => {
+  const result = await client.query(
+    "SELECT transactionid, prepared_at FROM pg_prepared_xacts WHERE prepared_at < NOW() - INTERVAL '1 hour'"
+  );
+  for (const row of result.rows) {
+    await client.query(`ROLLBACK PREPARED '${row.transactionid}'`);
+  }
+}, 3600000); // Every hour
+``` |
+| **Priority** | HIGH - Resource exhaustion risk |
+| **Production Risk** | Orphaned prepared transactions block new distributed transactions |
+
+---
+
+### 3. Sharding and Routing Problems
+
+#### 3.1 Hardcoded Default Shard Selection
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | When `defaultShardId` is not configured, the system silently falls back to the first shard in the list |
+| **Why** | The code emits a `console.warn` but continues with implicit behavior |
+| **Where** | `src/database.ts:78-86` |
+| **Impact** | Inconsistent routing, potential data loss if operations are routed to wrong shard, configuration errors go unnoticed |
+| **How to Mitigate** | **Short-term**: Make defaultShardId a required field. **Long-term**: Throw an error if defaultShardId is missing and sharding is enabled |
+| **Code Example - Current** | ```typescript
+if (!defaultShardId) {
+  console.warn('... Falling back to first shard ...');
+  return { ..., defaultShardId: config.shards[0].id };
+}
+``` |
+| **Code Example - Fix** | ```typescript
+if (!defaultShardId) {
+  throw new ShardConfigError(
+    'Sharding is enabled but defaultShardId is not configured. ' +
+    'Explicit defaultShardId is required to avoid implicit routing ambiguity.'
+  );
+}
+``` |
+| **Priority** | HIGH - Data integrity risk |
+| **Production Risk** | Data written to wrong shard, data loss |
+
+#### 3.2 No Cross-Shard Transaction Support in Sharding API
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | The sharding API explicitly states that cross-shard transactions are not supported; only single-shard transactions are available |
+| **Why** | Implementing cross-shard atomicity requires distributed transactions (2PC), which has its own limitations |
+| **Where** | `src/database.ts:270-272` |
+| **Impact** | **ARCHITECTURAL LIMITATION**: Cannot perform atomic operations across multiple shards using the sharding API alone |
+| **How to Mitigate** | **Use distributed transaction layer for cross-shard operations**: `db.distributedTx.transaction()` instead of `db.sharding.transaction()`. Consider denormalizing data to avoid cross-shard operations where possible. |
+| **Priority** | HIGH - Architectural limitation |
+| **Production Risk** | Data inconsistency without proper handling |
+
+#### 3.3 Mutex Not Async-Safe
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Simple promise queue implementation may have race conditions under concurrent access |
+| **Why** | Not using proper async synchronization primitives like async-mutex library |
+| **Where** | `src/sharding/shard-manager.ts:72-88` |
+| **Impact** | Race conditions in shard routing, potential data corruption or inconsistent state |
+| **How to Mitigate** | **Short-term**: Use serialized access patterns. **Long-term**: Replace with proper async mutex implementation |
+| **Code Example - Current** | ```typescript
+const queue = [];
+let inProgress = false;
+async function acquire() {
+  while (inProgress) await new Promise(resolve => setImmediate(resolve));
+  inProgress = true;
+}
+``` |
+| **Code Example - Fix** | ```typescript
+import { Mutex } from 'async-mutex';
+const mutex = new Mutex();
+async function withLock(fn: () => Promise<void>) {
+  const release = await mutex.acquire();
+  try {
+    await fn();
+  } finally {
+    release();
+  }
+}
+``` |
+| **Priority** | MEDIUM - Race condition risk |
+| **Production Risk** | Data inconsistency, race conditions |
+
+#### 3.4 Sharding Validation Only at Startup
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Runtime configuration changes are not re-validated; validation only occurs in constructor |
+| **Why** | Validation logic is tightly coupled to initialization, not extracted as reusable function |
+| **Where** | `src/database.ts:230-280`, `src/sharding/shard-manager.ts:40-70` |
+| **Impact** | Configuration errors introduced at runtime go undetected until they cause failures |
+| **How to Mitigate** | **Short-term**: Restart application after configuration changes. **Long-term**: Extract validation to reusable function and call on configuration updates |
+| **Code Example - Current** | ```typescript
+constructor(config: ShardConfig) {
+  this.validateConfig(config);
+  // No validation on config updates
+}
+``` |
+| **Code Example - Fix** | ```typescript
+export function validateShardConfig(config: ShardConfig): void {
+  // Validation logic here
+}
+// Call whenever config changes
+validateShardConfig(config);
+``` |
+| **Priority** | MEDIUM - Configuration safety |
+| **Production Risk** | Undetected configuration errors |
+
+---
+
+### 4. Failover and Replication Issues
+
+#### 4.1 Replication Lag Query Incompatible with PostgreSQL < 13
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | The default lag query uses `pg_last_xact_replay_timestamp()` which is only available in PostgreSQL 13+ |
+| **Why** | The query is hardcoded and doesn't check PostgreSQL version |
+| **Where** | `src/replication/replication-manager.ts:17-18` |
+| **Impact** | Replication lag monitoring **will fail** with PostgreSQL 12 or earlier |
+| **How to Mitigate** | **Short-term**: Use version-appropriate query. **Long-term**: Detect PostgreSQL version and use appropriate lag query |
+| **Code Example - Fix** | ```typescript
+function getLagQuery(pgVersion: number): string {
+  if (pgVersion >= 130000) {
+    return "SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) * 1000 AS lag_ms";
+  }
+  // For PG 10-12: use pg_last_xlog_replay_location() (less accurate)
+  return "SELECT EXTRACT(EPOCH FROM (now() - (pg_last_xlog_replay_location() / 1000000))) * 1000 AS lag_ms";
+}
+``` |
+| **Priority** | HIGH - Compatibility issue |
+| **Production Risk** | Lag monitoring broken, failover may not trigger |
+
+#### 4.2 Connection Invalidation is Best-Effort
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | `invalidateConnections()` only closes idle connections; connections currently in transactions are left open |
+| **Why** | Design choice to avoid aborting in-flight transactions |
+| **Where** | `src/failover/connection-tracker.ts:175-195` |
+| **Impact** | After failover, existing transactions continue writing to the **old primary** until they complete, causing data inconsistency |
+| **How to Mitigate** | **Set appropriate transaction timeouts at application level** and consider implementing connection force-close after a grace period for connections stuck in transactions during failover. |
+| **Priority** | HIGH - Data consistency risk |
+| **Production Risk** | Data written to old primary, inconsistency |
+
+#### 4.3 No Automatic Primary Election
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | The failover manager relies on an external HA provider for primary election; it does not implement automatic failover internally |
+| **Why** | The design delegates primary election to external systems (Patroni, pg_auto_failover, etc.) |
+| **Where** | `src/failover/failover-manager.ts`, `src/failover/ha-provider.ts` |
+| **Impact** | **ARCHITECTURAL CONSTRAINT**: Cannot use failover features without deploying external HA infrastructure |
+| **How to Mitigate** | **Deploy with Patroni or pg_auto_failover**: Configure HA provider in failover manager. Implement health checks and monitoring for primary detection. Document the dependency on external HA solution. |
+| **Priority** | HIGH - Architectural dependency |
+| **Production Risk** | Failover features non-functional without external infrastructure |
+
+#### 4.4 Health Check Intervals Hardcoded
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Health check intervals (5s, 30s) are hardcoded constants that cannot be configured |
+| **Why** | Interval values are defined as constants in the source code |
+| **Where** | `src/failover/failover-manager.ts:95-105`, `src/replication/replication-manager.ts:17-25` |
+| **Impact** | Cannot tune health check frequency for different production environments (high-frequency for critical systems, low-frequency for cost savings) |
+| **How to Mitigate** | **Short-term**: Fork and modify interval constants. **Long-term**: Expose intervals as configurable options |
+| **Code Example - Current** | ```typescript
+const HEALTH_CHECK_INTERVAL_MS = 5000; // Hardcoded
+const LAG_CHECK_INTERVAL_MS = 30000; // Hardcoded
+``` |
+| **Code Example - Fix** | ```typescript
+interface HealthCheckOptions {
+  intervalMs?: number; // Default: 5000
+  lagCheckIntervalMs?: number; // Default: 30000
+}
+function createFailoverManager(options: HealthCheckOptions = {}) {
+  const interval = options.intervalMs ?? 5000;
+  const lagInterval = options.lagCheckIntervalMs ?? 30000;
+  // ...
+}
+``` |
+| **Priority** | MEDIUM - Flexibility issue |
+| **Production Risk** | Suboptimal health check frequency |
+
+#### 4.5 No Feature Detection
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | No runtime PostgreSQL version check; features are used without checking availability |
+| **Why** | Feature detection is not implemented; code assumes PostgreSQL version supports all used features |
+| **Where** | Throughout `src/distributed-tx/`, `src/failover/`, `src/resharding/` |
+| **Impact** | Feature usage may fail on older PostgreSQL versions without clear error messages |
+| **How to Mitigate** | **Short-term**: Document PostgreSQL version requirements. **Long-term**: Implement feature detection on startup that checks PostgreSQL version and warns/errors on incompatibility |
+| **Code Example - Current** | ```typescript
+// Assumes PG 13+ without checking
+await client.query("SELECT pg_last_xact_replay_timestamp()");
+``` |
+| **Code Example - Fix** | ```typescript
+async function checkFeatureSupport(client: PoolClient): Promise<void> {
+  const version = await client.query("SHOW server_version");
+  const pgVersion = parseInt(version.rows[0].server_version.split('.')[0]);
+  if (pgVersion < 13 && needsPG13Features) {
+    throw new Error("PostgreSQL 13+ required for this feature");
+  }
+}
+``` |
+| **Priority** | MEDIUM - Compatibility issue |
+| **Production Risk** | Feature failures on older PostgreSQL versions |
+
+---
+
+### 5. Reliability and Error Handling Gaps
+
+#### 5.1 Retry is Not Enabled by Default
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Query retry is **opt-in** and disabled by default, even for transient errors |
+| **Why** | Design choice to maintain deterministic behavior by default |
+| **Where** | `src/client/client.ts:101-102`, `src/client/retry.ts` |
+| **Impact** | Transient errors (network blips, deadlocks) cause immediate query failure, reducing application resilience |
+| **How to Mitigate** | **Enable retry in production configuration**: Set reasonable retry policy with exponential backoff and jitter for transient errors. |
+| **Code Example - Production Config** | ```typescript
+const db = createDatabase({
+  retry: {
+    retries: 3,
+    initialDelayMs: 100,
+    maxDelayMs: 5000,
+    backoffMultiplier: 2,
+    jitter: 0.1,
+  },
+});
+``` |
+| **Priority** | HIGH - Reliability |
+| **Production Risk** | Reduced fault tolerance |
+
+#### 5.2 No Default Query Timeout
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Query timeouts are **not set by default**; the default is `0` (no timeout) |
+| **Why** | Design choice to not change default pg behavior |
+| **Where** | `src/client/client.ts:101-102` |
+| **Impact** | Long-running queries can **hang indefinitely**, blocking connection pool slots and causing resource exhaustion |
+| **How to Mitigate** | **Set query timeout in production**: Configure appropriate timeout based on expected query duration. |
+| **Code Example - Production Config** | ```typescript
+const db = createDatabase({
+  queryTimeout: 30000, // 30 seconds
+});
+``` |
+| **Priority** | HIGH - Resource exhaustion risk |
+| **Production Risk** | Blocked connections, pool exhaustion |
+
+#### 5.3 Circuit Breaker Only Monitors Pool Exhaustion
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | The `CircuitBreaker` only checks `PoolMonitor` state (connection pool exhaustion), not actual query failures |
+| **Why** | The design focuses on pool-level health rather than query-level health |
+| **Where** | `src/distributed-tx/circuit-breaker.ts:40-55` |
+| **Impact** | Circuit won't open for repeated query failures (e.g., database overload), only for connection exhaustion |
+| **How to Mitigate** | **Extend circuit breaker to track query failures**: Implement multi-level circuit breaking that considers both pool health and query failure rates. |
+| **Priority** | HIGH - Reliability |
+| **Production Risk** | Cascading failures without circuit protection |
+
+#### 5.4 Error Normalization Loses Type
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Original error type is lost when wrapped in `DatabaseError`; only error message and code are preserved |
+| **Why** | The error normalization process creates a consistent `DatabaseError` interface, stripping original error properties |
+| **Where** | `src/client/errors.ts:140-175` |
+| **Impact** | Debugging is harder as stack traces and error types from underlying libraries (pg, etc.) are lost |
+| **How to Mitigate** | **Short-term**: Check `error.originalError` if available. **Long-term**: Preserve original error as a property on the normalized error |
+| **Code Example - Current** | ```typescript
+function normalizeError(error: Error): DatabaseError {
+  return new DatabaseError(error.message, error.code);
+  // Original error type and stack lost
+}
+``` |
+| **Code Example - Fix** | ```typescript
+class DatabaseError extends Error {
+  originalError?: Error;
+  constructor(message: string, code: string, originalError?: Error) {
+    super(message);
+    this.originalError = originalError;
+    this.stack = originalError?.stack ?? this.stack;
+  }
+}
+``` |
+| **Priority** | MEDIUM - Debugging difficulty |
+| **Production Risk** | Harder debugging of production issues |
+
+---
+
+### 6. Environment and Dependency Constraints
+
+#### 6.1 Requires Node.js >= 20
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | The package requires Node.js 20 or higher |
+| **Why** | Uses modern JavaScript features and APIs available in Node.js 20+ |
+| **Where** | `package.json` (engines.node) |
+| **Impact** | **DEPLOYMENT CONSTRAINT**: Cannot deploy on Node.js 18 (EOL April 2025) or older |
+| **How to Mitigate** | **Upgrade deployment environments to Node.js 20+** or consider backporting to Node.js 18 for wider compatibility. |
+| **Priority** | MEDIUM - Deployment constraint |
+| **Production Risk** | Deployment incompatibility |
+
+#### 6.2 Requires PostgreSQL 13+ for Full Feature Set
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Many advanced features require PostgreSQL 13+ |
+| **Why** | Uses newer PostgreSQL features like `pg_last_xact_replay_timestamp()` |
+| **Where** | Throughout `src/replication/`, `src/distributed-tx/` |
+| **Impact** | **DEPLOYMENT CONSTRAINT**: Cannot use advanced features with PostgreSQL 12 or earlier |
+| **How to Mitigate** | **Use compatible PostgreSQL version** or implement fallback behaviors for older versions. |
+| **Priority** | MEDIUM - Deployment constraint |
+| **Production Risk** | Feature limitations on older PostgreSQL |
+
+#### 6.3 Test Containers Dependency
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Integration tests require Docker to be installed and running |
+| **Why** | Integration tests use testcontainers to spin up real PostgreSQL instances for testing |
+| **Where** | `package.json`, `test/integration/` |
+| **Impact** | **DEPLOYMENT CONSTRAINT**: Cannot run integration tests without Docker; CI/CD pipelines need Docker support |
+| **How to Mitigate** | **Short-term**: Skip integration tests without Docker. **Long-term**: Use optional peer dependency pattern or provide alternative test methods |
+| **Code Example - Current** | ```json
+"scripts": {
+  "test:integration": "testcontainers...",
+  "test": "test:unit && test:integration"
+}
+``` |
+| **Code Example - Fix** | ```json
+"scripts": {
+  "test:integration": "docker info > /dev/null 2>&1 && testcontainers... || echo 'Skipping integration tests (Docker not available)'",
+  "test": "test:unit && (test:integration || true)"
+}
+``` |
+| **Priority** | LOW - Development dependency |
+| **Production Risk** | Cannot run integration tests in certain environments |
+
+---
+
+## Fixed Issues (Recent Updates)
+
+> **IMPORTANT**: The following issues have been **FIXED** in the codebase and are documented here for reference. They no longer represent active limitations.
+
+### FIXED 1: Connection Leak Auto-Release in Pool
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Leaked pool connections are now auto-released (destroyed) after the 5-minute timeout |
+| **Previous Behavior** | Connections stayed checked out indefinitely; only a warning was logged |
+| **Current Behavior** | After 5 minutes, leaked connections are automatically released with an error, preventing memory leaks |
+| **Where** | `src/client/pool.ts:28-33` |
+| **Fix** | Added `client.release(new Error('Connection leaked — auto-released'));` in the leak timeout handler |
+| **Code** | ```typescript
+const leakTimeout = setTimeout(() => {
+    if (activeConnections.has(client)) {
+        logger?.warn?.({
+            message: 'Connection leak detected — auto-releasing connection',
+            stack: new Error().stack,
+            totalConnections: pool.totalCount,
+            idleConnections: pool.idleCount,
+        }, 'Database connection not released within 5 minutes - potential leak');
+        try {
+            client.release(new Error('Connection leaked — auto-released'));
+        } catch {
+            // Ignore errors during auto-release
+        }
+    }
+}, CONNECTION_VALIDATION_TIMEOUT);
+``` |
+| **Impact** | Prevents unbounded memory growth from connection leaks |
+| **Related Limitation** | Previously documented as "Connection Leak Detection Timeout is Hardcoded" (1.1) - **NOW PARTIALLY FIXED** |
+| **Status** | ✅ **FIXED** |
+
+---
+
+### FIXED 2: Connection Leak Auto-Release for Manual Clients
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Leaked manual clients (acquired via `getClient()`) are now auto-released after the 5-minute timeout |
+| **Previous Behavior** | Manual clients stayed checked out indefinitely; only a warning was logged |
+| **Current Behavior** | After 5 minutes, leaked manual clients are automatically released with an error |
+| **Where** | `src/client/client.ts:130-140` |
+| **Fix** | Added `client.release(new Error('Manual client leaked — auto-released'));` in the leak timer handler |
+| **Code** | ```typescript
+const leakTimer = setTimeout(() => {
+    if (manualClients.has(client)) {
+        (clientLogger as { warn?: (meta: object, msg: string) => void })?.warn?.({
+            message: 'Manual client not released - auto-releasing connection',
+            stack: new Error().stack,
+            totalManualClients: manualClients.size,
+        }, 'Database connection leak detected');
+        try {
+            client.release(new Error('Manual client leaked — auto-released'));
+        } catch {
+            // Ignore errors during auto-release
+        }
+    }
+}, CONNECTION_LEAK_TIMEOUT);
+``` |
+| **Impact** | Prevents unbounded memory growth from manual client leaks |
+| **Related Limitation** | Previously documented as "Global State Retention Prevents Garbage Collection" (1.2) - **NOW PARTIALLY FIXED** |
+| **Status** | ✅ **FIXED** |
+
+---
+
+### FIXED 3: SQL Injection Prevention in Distributed Transactions
+
+| **Aspect** | **Details** |
+|------------|-------------|
+| **What** | Prepared transaction IDs are now sanitized (single quotes escaped) before being interpolated into SQL |
+| **Previous Behavior** | Used raw string interpolation: `PREPARE TRANSACTION '${preparedId}'` - **CRITICAL SECURITY VULNERABILITY** |
+| **Current Behavior** | Single quotes are escaped by doubling: `preparedId.replace(/'/g, "''")` before interpolation |
+| **Where** | `src/distributed-tx/distributed-transaction-coordinator.ts:394-400` |
+| **Fix** | Added sanitization: `const safePreparedId = \`pg_${transactionId}_${shardId}\`.replace(/'/g, "''");` |
+| **Code** | ```typescript
+// Sanitize preparedId to prevent SQL injection in PREPARE TRANSACTION
+// (PREPARE TRANSACTION does not support parameterized identifiers)
+const safePreparedId = `pg_${transactionId}_${shardId}`.replace(/'/g, "''");
+
+await this.retryPolicy.execute(async () => {
+    await this.withTimeout(
+        () => client.query(`PREPARE TRANSACTION '${safePreparedId}'`),
+        this.timeouts.prepareTimeoutMs,
+        "prepare",
+        transactionId,
+        shardId,
+    );
+});
+``` |
+| **Impact** | **ELIMINATES CRITICAL SQL INJECTION VULNERABILITY** (CWE-89) |
+| **Related Limitation** | Previously documented as "SQL Injection Vulnerability in Prepared Transaction IDs" (2.1) - **NOW FIXED** |
+| **Status** | ✅ **FIXED - CRITICAL SECURITY ISSUE RESOLVED** |
+| **Note** | The sanitization is applied at the point where preparedId is created, ensuring all subsequent uses (COMMIT PREPARED, ROLLBACK PREPARED) use the safe version stored in the database |
+
+---
+
 ## When to Use Each Layer
 
 This section provides guidance on when to enable and use each architectural layer based on your application's requirements, scale, and complexity.
