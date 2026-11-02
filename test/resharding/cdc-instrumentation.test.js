@@ -192,6 +192,7 @@ describe("CDC instrumentation tests (live PostgreSQL)", () => {
         return createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "src",
                 strategy: "hash",
                 shards: [
                     { id: "src", connection: { connectionString: dbUri("cdc_src"), max: 5 } },

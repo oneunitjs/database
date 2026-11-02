@@ -87,6 +87,7 @@ describe("sharding configuration", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0", "postgresql://localhost:5432/shard0"),
@@ -108,6 +109,7 @@ describe("sharding configuration", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-a",
                 strategy: "directory",
                 shards: [makeShardConfig("shard-a"), makeShardConfig("shard-b")],
                 routing: {
@@ -138,6 +140,7 @@ describe("sharding configuration", () => {
             createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "shard-1",
                     strategy: "hash",
                     shards: [
                         makeShardConfig("shard-1"),
@@ -270,6 +273,7 @@ describe("shard routing", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0", "postgresql://localhost:5432/shard0"),
@@ -300,6 +304,7 @@ describe("shard routing", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -312,6 +317,7 @@ describe("shard routing", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -326,6 +332,7 @@ describe("shard routing", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0", "postgresql://localhost:5432/shard0"),

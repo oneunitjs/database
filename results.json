@@ -1,0 +1,346 @@
+{
+  "results": [
+    {
+      "name": "core.query.via_createClient",
+      "status": "PASS",
+      "detail": "{\"n\":1,\"db\":\"app\"}"
+    },
+    {
+      "name": "core.pool.query",
+      "status": "LIMIT",
+      "detail": "TIMEOUT pool.query after 2000ms"
+    },
+    {
+      "name": "core.health",
+      "status": "LIMIT",
+      "detail": "not invoked; shares pool.query path (createCheck -> pool.query)"
+    },
+    {
+      "name": "core.check",
+      "status": "LIMIT",
+      "detail": "not invoked; shares pool.query path"
+    },
+    {
+      "name": "schema.create.table",
+      "status": "LIMIT",
+      "detail": "not invoked; schema helpers call pool.query directly"
+    },
+    {
+      "name": "core.ddl.via_db.query",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "core.parameterized_sql_blocks_injection",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "core.queryOne",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "core.queryOne.empty_is_null",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "core.block",
+      "status": "FAIL",
+      "detail": "error: there is no parameter $1\n    at /tmp/oneunitjs-database/node_modules/pg/lib/client.js:694:17\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)\n    at async executeOnce (/tmp/oneunitjs-database/src/client/client.ts:260:28)\n    at async Object.unifiedQuery (/tmp/oneunitjs-database/src/database.ts:1607:32)\n    at async run (/workspace/real-env/run-real-tests.mjs:179:28)"
+    },
+    {
+      "name": "core.queryTimeout",
+      "status": "PASS",
+      "detail": "Query timed out after 250ms"
+    },
+    {
+      "name": "core.retry.default_off",
+      "status": "PASS",
+      "detail": "division by zero"
+    },
+    {
+      "name": "core.health.down_on_bad_port",
+      "status": "LIMIT",
+      "detail": "health() uses pool.query; cannot observe down vs hang without leaking a slot"
+    },
+    {
+      "name": "model.insert.returning",
+      "status": "PASS",
+      "detail": "{\"id\":1,\"email\":\"a1@x.com\",\"status\":\"active\",\"score\":10,\"deleted_at\":null,\"created_at\":\"2026-11-02T21:39:38.184Z\",\"updated_at\":\"2026-11-02T21:39:38.184Z\",\"version\":1}"
+    },
+    {
+      "name": "model.findById",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "model.find.eq",
+      "status": "PASS",
+      "detail": "n=1"
+    },
+    {
+      "name": "model.count",
+      "status": "PASS",
+      "detail": "1"
+    },
+    {
+      "name": "model.exists",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "model.updateById.optimisticLock",
+      "status": "LIMIT",
+      "detail": "Optimistic locking requires \"version\" in the WHERE clause"
+    },
+    {
+      "name": "model_query_batch.block",
+      "status": "FAIL",
+      "detail": "TypeError: Optimistic locking requires \"version\" in the WHERE clause\n    at update (/tmp/oneunitjs-database/src/model/model.ts:708:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)\n    at async remove (/tmp/oneunitjs-database/src/model/model.ts:769:28)\n    at async Object.removeById (/tmp/oneunitjs-database/src/model/model.ts:805:22)\n    at async run (/workspace/real-env/run-real-tests.mjs:383:13)"
+    },
+    {
+      "name": "migrate.run.sql_and_fn",
+      "status": "PASS",
+      "detail": "[\"001_widgets\",\"002_color\"]"
+    },
+    {
+      "name": "migrate.run.idempotent",
+      "status": "PASS",
+      "detail": "[]"
+    },
+    {
+      "name": "migrate.status",
+      "status": "PASS",
+      "detail": "[{\"id\":\"001_widgets\",\"status\":\"applied\"},{\"id\":\"002_color\",\"status\":\"applied\"}]"
+    },
+    {
+      "name": "migrate.rollback",
+      "status": "PASS",
+      "detail": "null"
+    },
+    {
+      "name": "cursor.read_and_iterate",
+      "status": "PASS",
+      "detail": "first=10 rest=30"
+    },
+    {
+      "name": "stream.query_stream",
+      "status": "PASS",
+      "detail": "n=40"
+    },
+    {
+      "name": "json-serialization.roundtrip",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "sharding.hash.deterministic",
+      "status": "PASS",
+      "detail": "{\"tenant-a\":\"shard-2\",\"tenant-b\":\"shard-1\",\"tenant-c\":\"shard-1\",\"tenant-d\":\"shard-0\",\"tenant-e\":\"shard-0\",\"user-1\":\"shard-0\",\"user-2\":\"shard-0\",\"user-99\":\"shard-2\"}"
+    },
+    {
+      "name": "sharding.query.with_shardKey",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "sharding.queryOne.shardKey",
+      "status": "PASS",
+      "detail": "{\"tenant\":\"tenant-a\",\"email\":\"tenant-a@ex.com\",\"balance\":100}"
+    },
+    {
+      "name": "sharding.queryAllShards",
+      "status": "LIMIT",
+      "detail": "expected 8 got 0 {\"results\":[{}],\"successfulShards\":[\"shard-0\",\"shard-2\",\"shard-1\"],\"failedShards\":[],\"partial\":false}"
+    },
+    {
+      "name": "sharding.transaction.single_shard",
+      "status": "PASS",
+      "detail": "105"
+    },
+    {
+      "name": "sharding.transaction.without_shardKey",
+      "status": "LIMIT",
+      "detail": "uses default shard silently"
+    },
+    {
+      "name": "sharding.health",
+      "status": "PASS",
+      "detail": "{\"healthy\":true,\"checkedAt\":\"2026-11-02T21:39:38.671Z\",\"shards\":[{\"shardId\":\"shard-0\",\"connectivity\":\"healthy\",\"readiness\":\"ready\",\"status\":\"up\",\"latency\":{\"value\":0,\"unit\":\"ms\"},\"pool\":{\"total\":3,\"idle\":3,\"waiting\":0},\"checkedAt\":\"2026-11-02T21:39:38.672Z\",\"consecutiveFailures\":0},{\"shardId\":\"shard"
+    },
+    {
+      "name": "sharding.defaultShardId.optional_fallback",
+      "status": "LIMIT",
+      "detail": "createDatabase succeeded without defaultShardId"
+    },
+    {
+      "name": "sharding.strategy.tenant",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "sharding.tenant.unknown_key",
+      "status": "PASS",
+      "detail": "Unable to route to a shard for key \"unknown-tenant\": Shard not found: No tenant mapping for shard key: unknown-tenant"
+    },
+    {
+      "name": "distributedTx.commit",
+      "status": "PASS",
+      "detail": "{\"transactionId\":\"tx-mvzs7y8p-db-1793655578814-jtpzj8op-zmh5yqzi8ve\",\"status\":\"committed\",\"participants\":{\"shard-0\":\"committed\",\"shard-1\":\"committed\"}}"
+    },
+    {
+      "name": "distributedTx.commit.persisted",
+      "status": "PASS",
+      "detail": "b0=40 b1=60"
+    },
+    {
+      "name": "distributedTx.block",
+      "status": "FAIL",
+      "detail": "error: current transaction is aborted, commands ignored until end of transaction block\n    at /tmp/oneunitjs-database/node_modules/pg/lib/client.js:694:17\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)\n    at async unifiedQuery (/tmp/oneunitjs-database/src/database.ts:1485:21)\n    at async Object.shardAwareQueryOne (/tmp/oneunitjs-database/src/database.ts:1735:24)\n    at async run (/workspace/real-env/run-real-tests.mjs:809:28)"
+    },
+    {
+      "name": "distributedTx.requires_sharding",
+      "status": "PASS",
+      "detail": "ShardingDisabledError: Sharding is disabled"
+    },
+    {
+      "name": "replication.create_with_unrelated_replica",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "replication.readPreference.replica-preferred",
+      "status": "PASS",
+      "detail": "[{\"c\":1}]"
+    },
+    {
+      "name": "api.resharding.present",
+      "status": "PASS",
+      "detail": "manager,coordination,ownsCoordination,schema,store,changeCapture,copier,cutoverEngine,logger,hooks,bulkCopy,validation,cutoverOpts,closed,descriptors,activeMigrationId,coordinationInitialized,coordinationInitPromise,pauseFromStatus,progressCalculator,copyMetrics,schemaValidator,checksumVerifier,cutoverValidator,reporter,reversePlanner"
+    },
+    {
+      "name": "api.schemaSync.present",
+      "status": "LIMIT",
+      "detail": "undefined"
+    },
+    {
+      "name": "failover.classes.exported",
+      "status": "PASS",
+      "detail": "StaticHaProvider=function FailoverManager=function"
+    },
+    {
+      "name": "api.surface",
+      "status": "PASS",
+      "detail": "query,queryOne,getClient,releaseClient,transaction,savepoint,prepare,stream,cursor,check,health,shutdown,batch,from,model,schema,migrate,hooks,metrics,sharding"
+    }
+  ],
+  "limitations": [
+    {
+      "title": "CRITICAL: pg.Pool.query() hangs forever",
+      "evidence": "createPool() replaces pool.connect with an async function that ignores the callback. node-postgres Pool.query() calls connect(callback). The callback is never invoked, so schema helpers, health(), and check() deadlock. Each hung call also leaks a pool slot.",
+      "impact": "db.schema.*, db.health(), db.check(), and any code using db.pool.query hang until the client is killed"
+    },
+    {
+      "title": "db.health() and db.check() deadlock",
+      "evidence": "createCheck() uses pool.query('SELECT 1')",
+      "impact": "Readiness/liveness probes cannot use the built-in health API"
+    },
+    {
+      "title": "All db.schema.* DDL helpers deadlock",
+      "evidence": "schema/create.ts, alter.ts, drop.ts, constrain.ts, introspect.ts call pool.query() directly",
+      "impact": "Schema helpers are unusable; callers must use db.query() for DDL"
+    },
+    {
+      "title": "Query retry is opt-in (disabled by default)",
+      "evidence": "Serialization failures (40001) and deadlocks (40P01) are not retried unless retry options are passed",
+      "impact": "Transient errors fail the request unless the application configures retry"
+    },
+    {
+      "title": "health() cannot report down for a dead port because it uses hanging pool.query()",
+      "evidence": "createCheck never returns {status:'down'} if connect callback is dropped",
+      "impact": "Readiness probes can deadlock the process"
+    },
+    {
+      "title": "Optimistic locking on updateById threw",
+      "evidence": "Optimistic locking requires \"version\" in the WHERE clause",
+      "impact": "Callers must pass the version column in data/where"
+    },
+    {
+      "title": "queryAllShards total != inserted rows",
+      "evidence": "{\"results\":[{}],\"successfulShards\":[\"shard-0\",\"shard-2\",\"shard-1\"],\"failedShards\":[],\"partial\":false}",
+      "impact": "Fan-out is not a global snapshot"
+    },
+    {
+      "title": "Sharded db.transaction() without shardKey uses the default shard",
+      "evidence": "Did not throw",
+      "impact": "Easy to write to the wrong shard"
+    },
+    {
+      "title": "Missing defaultShardId falls back to the first shard with only console.warn",
+      "evidence": "createDatabase did not throw",
+      "impact": "Un-keyed writes land on shard-0"
+    },
+    {
+      "title": "distributedTransaction failed on real multi-instance 2PC",
+      "evidence": "error: current transaction is aborted, commands ignored until end of transaction block\n    at /tmp/oneunitjs-database/node_modules/pg/lib/client.js:694:17\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)\n    at async unifiedQuery (/tmp/oneunitjs-database/src/database.ts:1485:21)\n    at async Object.shardAwareQueryOne (/tmp/oneunitjs-database/src/database.ts:1735:24)\n    at async run (/workspace/real-env/run-real-tests.mjs:809:28)",
+      "impact": "Cross-shard atomic writes"
+    },
+    {
+      "title": "Replication replica here is an independent primary, not a streaming standby",
+      "evidence": "Five clusters were started with wal_level=replica but no pg_basebackup/hot_standby follower",
+      "impact": "replica-preferred can read unrelated data; lag via pg_last_xact_replay_timestamp() needs a real standby (PG 13+)"
+    },
+    {
+      "title": "Schema auto-sync is off unless schemaSync + coordination DB are configured",
+      "evidence": "db.schemaSync was undefined",
+      "impact": "Multi-shard DDL drift is not repaired automatically"
+    },
+    {
+      "title": "Failover does not elect a new primary by itself",
+      "evidence": "FailoverManager + HaProvider integrate Patroni / pg_auto_failover / custom providers",
+      "impact": "Without external HA, a dead primary stays dead"
+    },
+    {
+      "title": "PostgreSQL only — no MySQL, SQLite, SQL Server adapters",
+      "evidence": "package.json depends solely on pg; engines node>=20",
+      "impact": "Cannot target anything except PostgreSQL"
+    },
+    {
+      "title": "This run used PostgreSQL 15.19, not the upstream testcontainers image postgres:16",
+      "evidence": "Debian postgresql-15 because Docker was unavailable",
+      "impact": "PG 16-only catalog changes untested; replication lag helper needs PG 13+"
+    },
+    {
+      "title": "No Docker / Testcontainers in this environment",
+      "evidence": "Five local clusters under /var/lib/postgresql/real-test ports 5432,5440-5443",
+      "impact": "Upstream vitest globalSetup cannot run without Docker"
+    },
+    {
+      "title": "Physical streaming replication was not configured",
+      "evidence": "All five instances are independent primaries",
+      "impact": "Lag-aware replica routing, WAL LSN waits, and failover promotion were not fully exercised"
+    },
+    {
+      "title": "Hardcoded timeouts remain in source",
+      "evidence": "CONNECTION_LEAK_TIMEOUT=300000 in client.ts; cursor 5m/30s in cursor.ts; pool leak timer not unref'd",
+      "impact": "Cannot tune leak/cursor timeouts; timers keep Node from exiting"
+    },
+    {
+      "title": "No global connection budget across shards",
+      "evidence": "Each shard Pool has its own max",
+      "impact": "N shards * max can exceed PostgreSQL max_connections"
+    },
+    {
+      "title": "Coordination database is a SPOF for 2PC metadata",
+      "evidence": "DistributedTransactionCoordinator persists to a single coordinationPool",
+      "impact": "If coordination DB dies, in-flight 2PC cannot record decisions"
+    },
+    {
+      "title": "Module-level Sets retain PoolClients (activeConnections, manualClients)",
+      "evidence": "src/client/pool.ts and src/client/client.ts never clear on shutdown",
+      "impact": "Long-running apps can leak memory across createDatabase() generations"
+    }
+  ]
+}

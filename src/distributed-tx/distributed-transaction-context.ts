@@ -89,8 +89,15 @@ export class DistributedTransactionContext {
         try {
             return (await client.query(text as string, resolvedValues ?? [])) as unknown as QueryResult<T>;
         } catch (error) {
-            // Mark transaction as aborted — the query failed
+            // Mark transaction as aborted — the query failed. Roll back the
+            // participant transaction so the connection is not returned to the
+            // pool in an aborted (25P02) state and reused by later queries.
             this.aborted = true;
+            try {
+                await client.query("ROLLBACK").catch(() => {});
+            } catch {
+                // Swallow rollback failures; the original error takes precedence.
+            }
             throw error;
         }
     }

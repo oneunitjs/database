@@ -197,6 +197,7 @@ describe("Resharding integration tests (live PostgreSQL)", () => {
         return createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "src",
                 strategy: "hash",
                 shards: [
                     { id: "src", connection: { connectionString: dbUri("rs_src"), max: 5 } },

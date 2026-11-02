@@ -67,6 +67,7 @@ describe("sharding query execution", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0", "postgresql://localhost:5432/shard0"),
@@ -94,6 +95,7 @@ describe("sharding query execution", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -128,6 +130,7 @@ describe("sharding query execution", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "directory",
                 shards: [makeShardConfig("shard-0")],
                 routing: { directory: { "user-1": "shard-0" } },
@@ -143,6 +146,7 @@ describe("sharding query execution", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0", "postgresql://localhost:5432/shard0"),
@@ -176,6 +180,7 @@ describe("sharding transactions", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -200,6 +205,7 @@ describe("sharding transactions", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -244,6 +250,7 @@ describe("sharding pool management", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0"),
@@ -265,6 +272,7 @@ describe("sharding pool management", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -322,6 +330,7 @@ describe("sharding routing diagnostics", () => {
         return createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0", "postgresql://localhost:5432/s0"),
@@ -457,6 +466,7 @@ describe("unified API (db.query / db.transaction with sharding)", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0", "postgresql://localhost:5432/shard0"),
@@ -480,6 +490,7 @@ describe("unified API (db.query / db.transaction with sharding)", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0", "postgresql://localhost:5432/shard0"),
@@ -498,6 +509,7 @@ describe("unified API (db.query / db.transaction with sharding)", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "directory",
                 shards: [makeShardConfig("shard-0")],
                 routing: { directory: { "user-1": "shard-0" } },
@@ -513,6 +525,7 @@ describe("unified API (db.query / db.transaction with sharding)", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -529,29 +542,32 @@ describe("unified API (db.query / db.transaction with sharding)", () => {
         expect(result).toEqual({ inserted: true });
     });
 
-    it("db.transaction() without shardKey uses primary pool", async () => {
+    it("db.transaction() without shardKey throws CrossShardTransactionError", async () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
                 strategy: "hash",
+                defaultShardId: "shard-0",
                 shards: [makeShardConfig("shard-0")],
             },
         });
 
-        const result = await db.transaction(
-            async (client) => {
-                await client.query("SELECT 1");
-                return "done";
-            },
-        );
-
-        expect(result).toBe("done");
+        await expect(
+            db.transaction(
+                async (client) => {
+                    await client.query("SELECT 1");
+                    return "done";
+                },
+                {},
+            ),
+        ).rejects.toMatchObject({ name: "CrossShardTransactionError" });
     });
 
     it("db.transaction() with unknown shard key throws ShardRoutingError", async () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "directory",
                 shards: [makeShardConfig("shard-0")],
                 routing: { directory: { "user-1": "shard-0" } },
@@ -570,6 +586,7 @@ describe("unified API (db.query / db.transaction with sharding)", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0", "postgresql://localhost:5432/shard0"),
@@ -624,6 +641,7 @@ describe("unified API (db.query / db.transaction with sharding)", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -643,6 +661,7 @@ describe("unified API (db.query / db.transaction with sharding)", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [makeShardConfig("shard-0")],
             },
@@ -683,6 +702,7 @@ describe("shard-aware query builder, models, prepared statements, and queryOne",
         return createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     makeShardConfig("shard-0", "postgresql://localhost:5432/shard0"),

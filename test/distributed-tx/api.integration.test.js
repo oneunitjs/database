@@ -28,6 +28,7 @@ describe("Distributed transaction API integration", () => {
             connectionString: "postgresql://localhost:5432/app",
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     { id: "shard-0", connection: { connectionString: "postgresql://localhost:5432/app" } },
@@ -55,6 +56,7 @@ describe("Distributed transaction API integration", () => {
             connectionString: "postgresql://localhost:5432/app",
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     { id: "shard-0", connection: { connectionString: "postgresql://localhost:5432/app" } },

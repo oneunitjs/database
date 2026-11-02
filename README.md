@@ -3078,6 +3078,8 @@ try {
 ## Production Considerations
 
 > **IMPORTANT**: Before deploying to production, review this section carefully. It documents known limitations, requirements, and recommendations for production use.
+>
+> 📖 **Complete limitation inventory**: See [`docs/limitation.md`](docs/limitation.md) for a comprehensive catalog of all known limitations, their severity, impact, and mitigation strategies.
 
 ### Recently Fixed Issues
 
@@ -3677,6 +3679,8 @@ const password = await getSecret('db-password');
 ### Known Limitations and Workarounds
 
 > **CRITICAL**: Review this section before production deployment.
+>
+> 📖 For a comprehensive catalog of all known limitations with severity ratings, impact analysis, and mitigation strategies, see [`docs/limitation.md`](docs/limitation.md).
 
 #### 1. SQL Injection in Distributed Transactions (CRITICAL)
 

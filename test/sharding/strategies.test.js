@@ -696,6 +696,7 @@ describe("database integration with all strategies", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "consistent-hash",
                 shards: [
                     makeShardConfig("shard-0", "postgresql://localhost:5432/s0"),
@@ -714,6 +715,7 @@ describe("database integration with all strategies", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "rendezvous",
                 shards: [makeShardConfig("shard-0"), makeShardConfig("shard-1")],
                 hashSeed: "my-seed",
@@ -727,6 +729,7 @@ describe("database integration with all strategies", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "range",
                 shards: [
                     makeShardConfig("shard-0"),
@@ -746,6 +749,7 @@ describe("database integration with all strategies", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "tenant",
                 shards: [makeShardConfig("shard-0"), makeShardConfig("shard-1")],
                 tenants: { "tenant-a": "shard-0", "tenant-b": "shard-1" },
@@ -759,6 +763,7 @@ describe("database integration with all strategies", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "composite",
                 shards: [makeShardConfig("shard-0"), makeShardConfig("shard-1")],
                 hashStrategy: "hash",
@@ -772,6 +777,7 @@ describe("database integration with all strategies", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "geographic",
                 shards: [makeShardConfig("shard-0"), makeShardConfig("shard-1")],
                 regions: { "us-east": ["shard-0"], "eu-west": ["shard-1"] },
@@ -785,6 +791,7 @@ describe("database integration with all strategies", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "weighted",
                 shards: [
                     { id: "shard-0", connection: { host: "localhost" }, weight: 1 },
@@ -800,6 +807,7 @@ describe("database integration with all strategies", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "consistent-hash",
                 shards: [makeShardConfig("shard-0"), makeShardConfig("shard-1")],
             },
@@ -813,6 +821,7 @@ describe("database integration with all strategies", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "range",
                 shards: [makeShardConfig("shard-0"), makeShardConfig("shard-1")],
                 ranges: [
@@ -833,6 +842,7 @@ describe("database integration with all strategies", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "weighted",
                 shards: [
                     { id: "shard-0", connection: { host: "localhost" }, weight: 1 },
@@ -849,6 +859,7 @@ describe("database integration with all strategies", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "directory",
                 shards: [makeShardConfig("shard-0")],
                 routing: { directory: { "user-1": "shard-0" } },

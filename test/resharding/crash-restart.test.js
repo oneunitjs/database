@@ -16,7 +16,8 @@ function makeDescriptor(migrationId) { return { migrationId, tables: [{ table: "
 function targetTopology() { return { shards: [{ id: "dst", version: 2, connection: { host: undefined, port: undefined, database: undefined, user: undefined }, addedAt: new Date().toISOString() }], strategy: "hash", strategyConfig: {}, routingVersion: 2, capturedAt: new Date().toISOString() }; }
 async function setupShards(dbs) { await dbs.src.query(accountsDDL()); await dbs.dst.query(accountsDDL()); }
 async function truncateAccounts(dbs) { try { await dbs.src.query(`TRUNCATE accounts RESTART IDENTITY`); await dbs.dst.query(`TRUNCATE accounts RESTART IDENTITY`); await dbs.src.query(`TRUNCATE resharding_routing_versions`); await dbs.src.query(`TRUNCATE resharding_migrations`); await dbs.src.query(`TRUNCATE resharding_units`); await dbs.src.query(`TRUNCATE resharding_changes`); await dbs.src.query(`DELETE FROM resharding_write_gate`); } catch {} }
-function newDb() { return createDatabase({ sharding: { enabled: true, strategy: "hash", shards: [ { id: "src", connection: { connectionString: dbUri("cr_src"), max: 5 } }, { id: "dst", connection: { connectionString: dbUri("cr_dst"), max: 5 } } ] } }); }
+function newDb() { return createDatabase({ sharding: { enabled: true,
+                defaultShardId: "src", strategy: "hash", shards: [ { id: "src", connection: { connectionString: dbUri("cr_src"), max: 5 } }, { id: "dst", connection: { connectionString: dbUri("cr_dst"), max: 5 } } ] } }); }
 async function initRsharding(rsharding, srcPool, dstPool) { await rsharding.init(); await rsharding.initShard("src", srcPool); await rsharding.initShard("dst", dstPool); }
 describe("Resharding crash-restart tests (live PostgreSQL)", () => {
     beforeAll(async () => {

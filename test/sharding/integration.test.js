@@ -188,6 +188,7 @@ describe("Sharding integration tests (live PostgreSQL)", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     {
@@ -236,6 +237,7 @@ describe("Sharding integration tests (live PostgreSQL)", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     {
@@ -299,6 +301,7 @@ describe("Sharding integration tests (live PostgreSQL)", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     {
@@ -362,6 +365,7 @@ describe("Sharding integration tests (live PostgreSQL)", () => {
         const db = createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "shard-0",
                 strategy: "hash",
                 shards: [
                     {

@@ -221,6 +221,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
         return createDatabase({
             sharding: {
                 enabled: true,
+                defaultShardId: "src",
                 strategy: "hash",
                 shards: [
                     { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -478,6 +479,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -620,6 +622,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -777,6 +780,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -945,6 +949,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -1229,6 +1234,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -1309,6 +1315,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 10 } },
@@ -1375,6 +1382,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -1452,6 +1460,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -1506,6 +1515,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -1565,6 +1575,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -1653,6 +1664,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -1719,6 +1731,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -1819,6 +1832,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             const db2 = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -1904,6 +1918,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },
@@ -2099,6 +2114,7 @@ describe("Resharding fault-injection tests (live PostgreSQL)", () => {
             db = createDatabase({
                 sharding: {
                     enabled: true,
+                defaultShardId: "src",
                     strategy: "hash",
                     shards: [
                         { id: "src", connection: { connectionString: dbUri("fi_src"), max: 5 } },

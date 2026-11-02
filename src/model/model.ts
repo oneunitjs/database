@@ -752,7 +752,15 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
     }
 
     async function updateById(id: unknown, data: Record<string, unknown>, options: ModelFindOptions = {}): Promise<QueryResultRow | null> {
-        const rows = await update({ [idColumn]: id }, data, options);
+        let where: Record<string, unknown> = { [idColumn]: id };
+        if (optimisticLocking) {
+            const current = await findById(id, options);
+            if (!current) {
+                return null;
+            }
+            where = { ...where, [optimisticLocking.column]: current[optimisticLocking.column] };
+        }
+        const rows = await update(where, data, options);
         return rows[0] ?? null;
     }
 
@@ -802,7 +810,15 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
     }
 
     async function removeById(id: unknown, options: ModelFindOptions & { forceDelete?: boolean } = {}): Promise<QueryResultRow | null> {
-        const rows = await remove({ [idColumn]: id }, options);
+        let where: Record<string, unknown> = { [idColumn]: id };
+        if (optimisticLocking) {
+            const current = await findById(id, options);
+            if (!current) {
+                return null;
+            }
+            where = { ...where, [optimisticLocking.column]: current[optimisticLocking.column] };
+        }
+        const rows = await remove(where, options);
         return rows[0] ?? null;
     }
 
