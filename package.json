@@ -1,7 +1,7 @@
 {
   "name": "@oneunit/database",
   "version": "2.0.0-beta.1",
-  "description": "PostgreSQL client with pooling, transactions, streaming, schema tools, models, and migrations.",
+  "description": "Production-ready PostgreSQL client for Node.js with connection pooling, distributed transactions (2PC), schema auto-sync across shards, streaming cursors, query builder, table models, read-replica routing, and high-availability failover.",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -60,21 +60,35 @@
     "pack:check": "npm pack --dry-run"
   },
   "keywords": [
-    "bootstrap",
-    "framework",
-    "node",
-    "typescript",
     "postgresql",
     "postgres",
+    "pg",
     "database",
-    "pool",
-    "transaction",
+    "orm",
     "query-builder",
+    "connection-pool",
+    "transactions",
+    "distributed-transactions",
+    "two-phase-commit",
+    "2pc",
+    "sharding",
+    "schema-sync",
+    "schema-auto-sync",
+    "read-replica",
+    "failover",
+    "high-availability",
+    "streaming",
+    "cursors",
     "migrations",
-    "models",
-    "streaming"
+    "typescript",
+    "nodejs"
   ],
-  "author": "mayank",
+  "author": {
+    "name": "mayank",
+    "email": "mayank@oneunitjs.org",
+    "url": "https://github.com/oneunitjs"
+  },
+  "contributors": [],
   "license": "MIT",
   "sideEffects": false,
   "engines": {
@@ -93,6 +107,10 @@
     "url": "https://github.com/oneunitjs/database/issues"
   },
   "homepage": "https://github.com/oneunitjs/database/tree/master/packages/database#readme",
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/oneunitjs"
+  },
   "dependencies": {
     "pg": "^8.22.0"
   },
