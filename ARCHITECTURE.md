@@ -91,7 +91,21 @@ src/
 │   ├── shard-rebalance-tracker.ts # ShardRebalanceTracker — rebalance progress tracking
 │   ├── shard-execution-context.ts — ShardExecutionContext + OperationType
 │   ├── strategies.ts           # All 9 shard strategy implementations
-│   └── errors.ts               # ShardNotFoundError, ShardConfigError, etc.
+│   ├── errors.ts               # ShardNotFoundError, ShardConfigError, etc.
+│   ├── schema-sync-types.ts    # Schema sync types (statuses, options, results, hooks)
+│   ├── schema-sync-schema.ts   # SQL schema for coordination DB tables
+│   ├── schema-version-tracker.ts # SchemaVersionTracker — per-shard schema version/checksum tracking
+│   ├── schema-hash-calculator.ts # SchemaHashCalculator — deterministic schema checksums
+│   ├── sync-lock-manager.ts    # SyncLockManager — distributed sync locking
+│   ├── migration-applier.ts    # MigrationApplier — apply/rollback migrations per shard
+│   ├── schema-validator.ts     # SchemaValidator — cross-shard consistency validation
+│   ├── sync-state-store.ts     # SyncStateStore — durable sync operation state
+│   ├── schema-sync-service.ts  # SchemaSyncService — main sync orchestration
+│   ├── schema-rollback-coordinator.ts # SchemaRollbackCoordinator — coordinated rollback
+│   ├── schema-sync-hooks.ts    # SchemaSyncHooks — lifecycle hook dispatch
+│   ├── schema-sync-worker.ts   # SchemaSyncWorker — background consistency checks
+│   ├── schema-sync-reporter.ts # SchemaSyncReporter — sync progress reporting
+│   └── schema-sync-cli.ts      # SchemaSyncCLI — CLI for manual sync operations
 │
 ├── replication/                # Primary / read-replica routing
 │   ├── index.ts                # Barrel
@@ -115,7 +129,16 @@ src/
 │   ├── index.ts                # Barrel
 │   ├── distributed-transaction-coordinator.ts — coordinator lifecycle
 │   ├── distributed-transaction-context.ts — per-shard execution context
-│   └── coordinator-schema.ts   # coordination tables for prepared txns
+│   ├── coordinator-schema.ts   # coordination tables for prepared txns
+│   ├── distributed-tx-hooks.ts — lifecycle hook dispatch + hook types
+│   ├── participant-health.ts   # ParticipantHealthChecker — per-node health checks
+│   ├── prepared-transaction-scanner.ts # pg_prepared_xacts scanner
+│   ├── cleanup-diagnostics.ts  # TransactionCleanupManager — orphaned tx cleanup
+│   ├── retry-policy.ts         # RetryPolicy — exponential backoff + jitter
+│   ├── transaction-semaphore.ts # TransactionSemaphore — concurrent TX limiting
+│   ├── circuit-breaker.ts      # CircuitBreaker — pool exhaustion protection
+│   ├── connection-throttler.ts # ConnectionThrottler — per-TX connection limits
+│   └── distributed-transaction-manager.ts # DistributedTransactionManager — managed TX entry point
 │
 └── failover/                   # High-availability provider & state machine
     ├── index.ts                # Barrel
@@ -717,6 +740,110 @@ await coordinator.commit(txId);
 
 ---
 
+#### Schema Auto-Sync Layer (`sharding/` schema-sync files)
+
+**When to Use: When you need all shards to stay on the same schema version**
+
+Schema Auto-Sync keeps every shard in a sharded deployment on an identical schema. When a migration is applied, it is automatically propagated to all shards, with checksums tracked per shard for consistency validation and distributed locking to prevent concurrent syncs.
+
+- **SchemaSyncService** — Orchestrates the full sync workflow: lock → prepare → check → apply → validate → complete/rollback
+- **SchemaVersionTracker** — Records and reads per-shard schema version + checksum in the coordination database
+- **SchemaHashCalculator** — Computes deterministic SHA-256 checksums of schema definitions for drift detection
+- **MigrationApplier** — Applies or rolls back a migration on an individual shard, wrapped in a transaction with checksum validation
+- **SchemaValidator** — Compares version and checksum across all shards; produces a consistency report with inconsistent/missing shard lists
+- **SyncLockManager** — Distributed advisory lock (`schema_sync_global`, `schema_sync_<version>`) to serialize concurrent sync operations
+- **SyncStateStore** — Durable persistence of sync operation state (pending/applying/validating/completed/failed/rolled_back)
+- **SchemaRollbackCoordinator** — Coordinated rollback of a migration across all shards that successfully applied it
+- **SchemaSyncHooks** — Lifecycle callbacks: `onSyncStart/Complete/Fail`, `onShardStart/Complete/Fail`, `onValidationStart/Complete`, `onRollbackStart/Complete`
+- **SchemaSyncWorker** — Background periodic consistency check with optional auto-repair of inconsistencies
+- **SchemaSyncReporter** — Human-readable sync progress and status reports
+- **SchemaSyncCLI** — CLI commands: sync, validate, rollback, status, history, repair
+- **SchemaSyncSchema** — SQL for coordination tables: `schema_sync_state`, `shard_schema_versions`, `schema_sync_locks`, `migration_checksums`
+
+**Configuration** (via `createDatabase()` `schemaSync` option):
+
+```typescript
+const db = createDatabase({
+    sharding: { enabled: true, strategy: "hash", shards: [...] },
+    schemaSync: {
+        enabled: true,
+        coordinationPool: coordinationPool,
+        timeoutMs: 300_000,
+        shardTimeoutMs: 60_000,
+        maxRetries: 3,
+        skipUnavailableShards: false,
+        continueOnError: false,
+        validateConsistency: true,
+        parallel: false,
+        maxParallelShards: 10,
+        worker: { enabled: true, intervalMs: 300_000, autoRepair: false },
+        blockWritesOnInconsistency: false,
+    },
+});
+```
+
+**Workflow:**
+
+```
+1. Validate input + check for in-progress sync (distributed lock)
+2. Acquire global sync lock
+3. Create sync operation record; calculate migration checksum
+4. Read current version for each shard; identify shards needing updates
+5. Apply migration to each shard (sequential or parallel); record version/checksum
+6. Validate all shards match expected version + checksum; generate consistency report
+7. Mark operation completed/failed/rolled-back; invoke hooks; release lock
+```
+
+**Sync Statuses:** `pending` → `applying` → `validating` → `completed` | `failed` | `rolled_back` | `cancelling` → `cancelled`
+
+---
+
+#### Distributed Tx Connection Management Layer (`distributed-tx/`)
+
+**When to Use: When running many concurrent distributed transactions across shards**
+
+Distributed transactions hold one connection per participant shard for the transaction's lifetime. Under high concurrency this can exhaust connection pools. This layer provides connection management primitives:
+
+- **TransactionSemaphore** — Limits concurrent distributed transactions; excess transactions queue and wait for a slot (`maxConcurrent` default: 5, `timeoutMs` default: 30s)
+- **PoolMonitor** — Tracks per-pool utilization (total/idle/waiting/active/max) and notifies listeners on threshold crossings
+- **CircuitBreaker** — Wraps a PoolMonitor; opens (blocks new TX) when any pool's utilization exceeds a threshold; transitions `CLOSED` → `OPEN` → `HALF_OPEN` → `CLOSED`
+- **ConnectionThrottler** — Limits the number of connections a single transaction can hold across all shards (default: 100 per transaction)
+- **DistributedTransactionManager** — Managed entry point combining a `DistributedTransactionCoordinator` with semaphore, circuit breaker, and pool monitor
+
+```typescript
+import {
+    DistributedTransactionManager,
+    PoolMonitor,
+    TransactionSemaphore,
+    CircuitBreaker,
+    ConnectionThrottler,
+} from "@oneunit/database";
+
+const poolMonitor = new PoolMonitor(shardPools, {
+    warningThreshold: 0.8,
+    errorThreshold: 0.95,
+    checkIntervalMs: 5_000,
+});
+poolMonitor.start();
+
+const manager = new DistributedTransactionManager(coordinator, {
+    poolMonitor,
+    maxConcurrentTransactions: 5,
+});
+
+const result = await manager.transaction(async (tx) => {
+    await tx.execute({ shardId: "shard-1" }, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", [100, "user-1"]);
+    await tx.execute({ shardId: "shard-2" }, "UPDATE accounts SET balance = balance + $1 WHERE id = $2", [100, "user-2"]);
+});
+
+console.log(manager.getStatus());
+// { activeTransactions, queuedTransactions, circuitState, averagePoolUtilization, maxPoolUtilization }
+
+manager.shutdown();
+```
+
+---
+
 #### Failover Layer (`failover/`)
 
 **When to Use: When you need high availability with automatic primary/replica switching**
@@ -1082,6 +1209,29 @@ Each factory receives only the dependencies it needs (pool, query function, logg
 | `cleanup-diagnostics.ts` | `CleanupResult` / `CleanupDiagnosticsOptions` / `CleanupDiagnosticsLogger` | cleanup types | — |
 | `retry-policy.ts` | `RetryPolicy` | retry with exponential backoff + jitter | — |
 | `retry-policy.ts` | `RetryPolicyOptions` / `defaultIsRetryable` | retry types | — |
+| `transaction-semaphore.ts` | `TransactionSemaphore` | limit concurrent distributed transactions | — |
+| `circuit-breaker.ts` | `CircuitBreaker` | block new TX when pools near exhaustion | PoolMonitor |
+| `connection-throttler.ts` | `ConnectionThrottler` | per-transaction connection limits | — |
+| `distributed-transaction-manager.ts` | `DistributedTransactionManager` | managed TX entry point (semaphore + breaker + coordinator) | coordinator, PoolMonitor |
+
+### sharding schema-sync/
+
+| File | Factory / Class | Produces | Key Dependencies |
+| :--- | :--- | :--- | :--- |
+| `schema-sync-types.ts` | types | SchemaSyncStatus, SchemaSyncOptions, SchemaSyncResult, SchemaConsistencyReport, SchemaSyncHooks | — |
+| `schema-sync-schema.ts` | SQL | `schema_sync_state`, `shard_schema_versions`, `schema_sync_locks`, `migration_checksums` tables | — |
+| `schema-version-tracker.ts` | `SchemaVersionTracker` | per-shard schema version + checksum tracking | coordination pool |
+| `schema-hash-calculator.ts` | `SchemaHashCalculator` | deterministic SHA-256 schema checksums | — |
+| `sync-lock-manager.ts` | `SyncLockManager` | distributed sync locking | coordination pool |
+| `migration-applier.ts` | `MigrationApplier` | apply/rollback migrations per shard | shard pools, transaction |
+| `schema-validator.ts` | `SchemaValidator` | cross-shard schema consistency validation | shard pools |
+| `sync-state-store.ts` | `SyncStateStore` | durable sync operation state | coordination pool |
+| `schema-sync-service.ts` | `SchemaSyncService` | sync orchestration (lock → apply → validate → complete) | all above components |
+| `schema-rollback-coordinator.ts` | `SchemaRollbackCoordinator` | coordinated rollback across shards | MigrationApplier, SyncStateStore |
+| `schema-sync-hooks.ts` | `SchemaSyncHooks` | lifecycle hook dispatch | logger |
+| `schema-sync-worker.ts` | `SchemaSyncWorker` | background periodic consistency check | SchemaSyncService, ShardManager |
+| `schema-sync-reporter.ts` | `SchemaSyncReporter` | sync progress reports | — |
+| `schema-sync-cli.ts` | `SchemaSyncCLI` | CLI for manual sync operations | SchemaSyncService |
 
 ### failover/
 

@@ -49,6 +49,25 @@
 - **Distributed Transactions:** Added `ParticipantHealthChecker` with per-node health status, consecutive failure/success tracking, health check execution
 - **Distributed Transactions:** Added `PreparedTransactionScanner` for scanning pg_prepared_xacts and `TransactionCleanupManager` for diagnosing/cleaning up orphaned/old transactions
 - **Distributed Transactions:** Exported new types: `DistributedTxTimeoutConfig`, `RetryPolicyOptions`, `DistributedTxHookType`, `DistributedTxHookContext`, `DistributedTxHookData`, `DistributedTxHook`, `DistributedTxCoordinatorHookAPI`, `DistributedTxHooks`, `DistributedTxLogger`, `ParticipantHealthStatus`, `ParticipantHealthOptions`, `ParticipantHealthLogger`, `PreparedTransactionInfo`, `PreparedTransactionFilter`, `PreparedTransactionScannerOptions`, `PreparedTransactionScannerLogger`, `CleanupResult`, `CleanupDiagnosticsOptions`, `CleanupDiagnosticsLogger`
+- **Distributed Transactions:** Added `TransactionSemaphore` for limiting concurrent distributed transactions
+- **Distributed Transactions:** Added `PoolMonitor` for per-pool connection utilization tracking
+- **Distributed Transactions:** Added `CircuitBreaker` for blocking new transactions when pools near exhaustion
+- **Distributed Transactions:** Added `ConnectionThrottler` for per-transaction connection limits
+- **Distributed Transactions:** Added `DistributedTransactionManager` as a managed entry point combining coordinator, semaphore, circuit breaker, and pool monitor
+- **Schema Auto-Sync:** Added `SchemaSyncService` for orchestrating schema synchronization across all shards (lock → prepare → check → apply → validate → complete/rollback)
+- **Schema Auto-Sync:** Added `SchemaVersionTracker` for per-shard schema version and checksum tracking
+- **Schema Auto-Sync:** Added `SchemaHashCalculator` for deterministic SHA-256 schema checksums
+- **Schema Auto-Sync:** Added `MigrationApplier` for applying/rolling back migrations on individual shards
+- **Schema Auto-Sync:** Added `SchemaValidator` for cross-shard schema consistency validation
+- **Schema Auto-Sync:** Added `SyncLockManager` for distributed sync locking
+- **Schema Auto-Sync:** Added `SyncStateStore` for durable sync operation state
+- **Schema Auto-Sync:** Added `SchemaRollbackCoordinator` for coordinated rollback across shards
+- **Schema Auto-Sync:** Added `SchemaSyncHooks` for lifecycle callbacks
+- **Schema Auto-Sync:** Added `SchemaSyncWorker` for background periodic consistency checks
+- **Schema Auto-Sync:** Added `SchemaSyncReporter` for sync progress reporting
+- **Schema Auto-Sync:** Added `SchemaSyncCLI` for manual sync operations
+- **Schema Auto-Sync:** Added `SchemaSyncSchema` SQL for coordination DB tables
+- **Schema Auto-Sync:** Exported types: `SchemaSyncStatus`, `SchemaSyncOptions`, `SchemaSyncResult`, `SchemaConsistencyReport`, `ShardSchemaInfo`, `ShardSyncResult`, `SchemaSyncOperation`, `SchemaColumnSchemaInfo`, `SchemaIndexSchemaInfo`, `SchemaConstraintSchemaInfo`, `SchemaTableSchemaInfo`
 - **QueryBuilder:** Added comprehensive enhancements including CTE (WITH clause) support via `with()` and `withRecursive()`
 - **QueryBuilder:** Added Window Function support via `window()` method and helper functions `sql.rowNumber()`, `sql.rank()`, `sql.denseRank()`
 - **QueryBuilder:** Added Complex Join support (RIGHT JOIN, FULL OUTER JOIN, CROSS JOIN, LEFT OUTER JOIN, RIGHT OUTER JOIN)

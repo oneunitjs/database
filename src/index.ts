@@ -11,6 +11,7 @@ export * from "./client/batch.js";
 export * from "./client/errors.js";
 export * from "./client/retry.js";
 export * from "./client/hooks.js";
+export { PoolMonitor } from "./client/pool-monitor.js";
 export * from "./column/index.js";
 export * from "./schema/index.js";
 export * from "./query/sql.js";
@@ -18,8 +19,8 @@ export * from "./query/builder.js";
 export * from "./model/model.js";
 export * from "./json-serialization.js";
 export type { SslConfig, RetryOptions, InstrumentationOptions, IdleTransactionTimeout, DatabaseConfig, Database, QueryOptions, CreateDatabaseOptions, Logger, QueryFragment, SqlFragment, Model, ModelFactory, ModelOptions, ShardingConfig, ShardConfig, WeightedShardConfig, ShardRange, ShardStrategyName, ShardingApi, ShardInfo, ShardRoutingContext, ShardStrategy, LegacyShardingConfig, BaseShardingConfig, HashShardingConfig, ConsistentHashShardingConfig, RendezvousShardingConfig, RangeShardingConfig, DirectoryShardingConfig, TenantShardingConfig, CompositeShardingConfig, GeographicShardingConfig, WeightedShardingConfig, ReplicationConfig, ReplicationMode, ReadPreference, ReplicationEndpointConfig, ReplicationEndpointHealth, ReplicationHealthResult, ReplicationApi, ShardReplicationConfig, CustomShardStrategyRegistration } from "./types.js";
-export { ShardManager, ShardRouter, ShardHealth, ShardMigrationTracker, ShardRebalanceTracker, HashShardStrategy, DirectoryShardStrategy, ConsistentHashShardStrategy, RendezvousShardStrategy, RangeShardStrategy, TenantShardStrategy, CompositeShardStrategy, GeographicShardStrategy, WeightedShardStrategy, createShardStrategy, registerShardStrategy, getRegisteredStrategyNames } from "./sharding/index.js";
-export type { ShardManagerOptions, ShardRouterOptions, ShardHealthOptions } from "./sharding/index.js";
+export { ShardManager, ShardRouter, ShardHealth, ShardMigrationTracker, ShardRebalanceTracker, HashShardStrategy, DirectoryShardStrategy, ConsistentHashShardStrategy, RendezvousShardStrategy, RangeShardStrategy, TenantShardStrategy, CompositeShardStrategy, GeographicShardStrategy, WeightedShardStrategy, createShardStrategy, registerShardStrategy, getRegisteredStrategyNames, SchemaSyncService, SchemaSyncWorker, SchemaVersionTracker, SchemaHashCalculator, SchemaValidator, MigrationApplier, SyncLockManager, SyncStateStore, SchemaSyncReporter, SchemaSyncCLI } from "./sharding/index.js";
+export type { ShardManagerOptions, ShardRouterOptions, ShardHealthOptions, SchemaSyncOptions, SchemaSyncResult, SchemaConsistencyReport, ShardSchemaInfo, ShardSyncResult, SchemaSyncOperation, SchemaDiffType, SyncOperationId, SchemaSyncHooks } from "./sharding/index.js";
 export { ShardNotFoundError, ShardUnavailableError, ShardingDisabledError, ShardConfigError, CrossShardTransactionError, ShardRoutingError, ShardNotReadyError, ShardCoordinationError, ShardTopologyStaleError, ShardOperationTimeoutError, ShardDrainTimeoutError, ShardMigrationPartialFailureError, isShardNotFoundError, isShardUnavailableError, isShardingDisabledError, isCrossShardTransactionError, isShardRoutingError, isShardNotReadyError, isShardCoordinationError, isShardTopologyStaleError, isShardOperationTimeoutError, isShardDrainTimeoutError, isShardMigrationPartialFailureError } from "./sharding/errors.js";
 
 // Online resharding / data migration
@@ -134,9 +135,18 @@ export {
     DistributedTxNotFoundError,
     DistributedTxAlreadyResolvedError,
     MaxPreparedTransactionsError,
+    TransactionSemaphore,
+    CircuitBreaker,
+    ConnectionThrottler,
+    DistributedTransactionManager,
 } from "./distributed-tx/index.js";
 export type {
     ParticipantContext,
     DistributedTxCoordinatorOptions,
     DistributedTransactionExecuteOptions,
+    SemaphoreOptions,
+    CircuitBreakerOptions,
+    CircuitState,
+    DistributedTransactionManagerOptions,
+    ConnectionThrottlerOptions,
 } from "./distributed-tx/index.js";

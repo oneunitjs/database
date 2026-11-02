@@ -47,8 +47,10 @@ Built on [`pg`](https://node-postgres.com), with optional [`pg-cursor`](https://
 - [Health Checks & Shutdown](#health-checks--shutdown)
 - [Sharding](#sharding)
 - [Replication](#replication)
+- [Schema Auto-Sync](#schema-auto-sync)
 - [Online Resharding (Data Migration)](#online-resharding-data-migration)
 - [Distributed Transactions](#distributed-transactions)
+  - [Distributed Tx Connection Management](#distributed-tx-connection-management)
 - [Failover](#failover)
 - [Error Handling](#error-handling)
 - [Logging & Metrics](#logging--metrics)
@@ -74,6 +76,7 @@ Built on [`pg`](https://node-postgres.com), with optional [`pg-cursor`](https://
 | `sharding/` | Multi-shard routing (9 strategies), shard health, metrics, migration tracking |
 | `replication/` | Primary / read-replica routing with lag-aware health checks |
 | `resharding/` | Durable online data migration (plan → copy → validate → cutover → finalize) |
+| `schema-sync/` | Automatic schema synchronization across shards (version tracking, checksums, locking, validation) |
 | `distributed-tx/` | Cross-shard two-phase commit (2PC) coordinator |
 | `failover/` | High-availability provider and state machine |
 
@@ -97,13 +100,13 @@ The full architectural diagram and module interaction details are in **ARCHITECT
 
 ### Quick Decision Matrix
 
-| Use Case | Core Client | Query Builder | Models | Schema/Migrations | Sharding | Replication | Resharding | Distributed TX | Failover |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Simple App** — Single DB, basic CRUD | ✅ Required | ✅ Recommended | ✅ Optional | ✅ Recommended | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **Growing App** — Single DB, needs abstractions | ✅ Required | ✅ Recommended | ✅ Recommended | ✅ Required | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **Read-Heavy App** — Single primary, multiple replicas | ✅ Required | ✅ Recommended | ✅ Optional | ✅ Recommended | ❌ | ✅ Required | ❌ | ❌ | ❌ |
-| **Scaled App** — Multiple shards, partitioned data | ✅ Required | ✅ Recommended | ✅ Optional | ✅ Required | ✅ Required | ✅ Recommended | ✅ Optional | ❌ | ❌ |
-| **Enterprise App** — Multi-shard, HA, zero-downtime changes | ✅ Required | ✅ Recommended | ✅ Optional | ✅ Required | ✅ Required | ✅ Required | ✅ Required | ✅ Required | ✅ Required |
+| Use Case | Core Client | Query Builder | Models | Schema/Migrations | Sharding | Schema Auto-Sync | Replication | Resharding | Distributed TX | Failover |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Simple App** — Single DB, basic CRUD | ✅ Required | ✅ Recommended | ✅ Optional | ✅ Recommended | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Growing App** — Single DB, needs abstractions | ✅ Required | ✅ Recommended | ✅ Recommended | ✅ Required | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Read-Heavy App** — Single primary, multiple replicas | ✅ Required | ✅ Recommended | ✅ Optional | ✅ Recommended | ❌ | ❌ | ✅ Required | ❌ | ❌ | ❌ |
+| **Scaled App** — Multiple shards, partitioned data | ✅ Required | ✅ Recommended | ✅ Optional | ✅ Required | ✅ Required | ✅ Optional | ✅ Recommended | ✅ Optional | ❌ | ❌ |
+| **Enterprise App** — Multi-shard, HA, zero-downtime changes | ✅ Required | ✅ Recommended | ✅ Optional | ✅ Required | ✅ Required | ✅ Required | ✅ Required | ✅ Required | ✅ Required | ✅ Required |
 
 ### Feature Descriptions by Use Case
 
@@ -1716,6 +1719,178 @@ The application supplies a `MigrationDescriptor` describing each table's primary
 
 ---
 
+## Schema Auto-Sync
+
+Schema Auto-Sync keeps all shards in a sharded deployment on the same schema version. When a migration is applied, it is automatically propagated to every shard, with checksums tracked per shard for consistency validation, distributed locking to prevent concurrent syncs, and optional background repair.
+
+### Configuration
+
+Enable schema auto-sync via `createDatabase()` options:
+
+```javascript
+import { createDatabase } from "@oneunit/database";
+
+const db = createDatabase({
+    sharding: {
+        enabled: true,
+        strategy: "tenant",
+        shards: [
+            { id: "shard-us-east-1", connection: { connectionString: US_EAST_1_URL } },
+            { id: "shard-us-west-1", connection: { connectionString: US_WEST_1_URL } },
+            { id: "shard-eu-west-1", connection: { connectionString: EU_WEST_1_URL } },
+        ],
+    },
+    schemaSync: {
+        enabled: true,
+        coordinationPool: coordinationPool, // required: Pool or PoolConfig or connection string
+        timeoutMs: 600_000,          // total sync timeout (default: 300s)
+        shardTimeoutMs: 120_000,     // per-shard timeout (default: 60s)
+        maxRetries: 3,               // retries per shard (default: 3)
+        retryBaseDelayMs: 1_000,     // base retry delay (default: 1s)
+        retryMaxDelayMs: 30_000,     // max retry delay (default: 30s)
+        skipUnavailableShards: true, // skip unavailable shards (default: false)
+        continueOnError: false,      // stop on first error (default: false)
+        validateConsistency: true,   // validate after sync (default: true)
+        dryRun: false,               // validate but don't apply (default: false)
+        parallel: true,              // apply to shards in parallel (default: false)
+        maxParallelShards: 5,        // max parallel shards (default: 10)
+        worker: {
+            enabled: true,           // background consistency worker (default: true)
+            intervalMs: 300_000,     // check interval (default: 5min)
+            autoRepair: false,       // auto-repair inconsistencies (default: false)
+        },
+        blockWritesOnInconsistency: true, // block writes to stale shards (default: false)
+    },
+});
+```
+
+### API
+
+Access the service via `db.schemaSync` (undefined when schema sync is disabled):
+
+```javascript
+// Sync all pending migrations across all shards
+const result = await db.schemaSync.sync([{
+    id: "001_create_users",
+    name: "Create users table",
+    up: "CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL)",
+    down: "DROP TABLE users",
+}]);
+
+// result: { operationId, status: "completed", totalShards, successfulShards, failedShards, shardResults, durationMs, checksum }
+
+// Sync a single migration
+await db.schemaSync.syncMigration({
+    id: "002_add_email",
+    name: "Add email column",
+    up: "ALTER TABLE users ADD COLUMN email VARCHAR(255)",
+    down: "ALTER TABLE users DROP COLUMN email",
+});
+
+// Validate schema consistency across all shards
+const report = await db.schemaSync.validate();
+// report: { isConsistent, expectedVersion, expectedChecksum, shards, inconsistentShards, missingShards }
+
+// Get sync operation status
+const operation = await db.schemaSync.getStatus("sync-12345");
+
+// Get sync history
+const history = await db.schemaSync.getHistory(10);
+
+// Cancel an ongoing sync operation
+await db.schemaSync.cancel("sync-12345");
+
+// Rollback a migration across all shards
+await db.schemaSync.rollback({
+    id: "001_create_users",
+    name: "Create users table",
+    up: "CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL)",
+    down: "DROP TABLE users",
+});
+```
+
+### Core Components
+
+| Component | Responsibility |
+| :--- | :--- |
+| `SchemaSyncService` | Orchestrates sync: lock → prepare → check → apply → validate → complete/rollback |
+| `SchemaVersionTracker` | Tracks schema version + checksum per shard in coordination DB |
+| `SchemaHashCalculator` | Computes deterministic SHA-256 schema checksums for validation |
+| `MigrationApplier` | Applies/rollbacks migrations to individual shards with checksum validation |
+| `SchemaValidator` | Validates schema consistency across all shards |
+| `SyncLockManager` | Distributed lock to prevent concurrent sync operations |
+| `SyncStateStore` | Durable storage for sync operation state |
+| `SchemaRollbackCoordinator` | Coordinated rollback of migrations across shards |
+| `SchemaSyncHooks` | Lifecycle hooks (sync start/complete/fail, shard start/complete/fail, validation start/complete, rollback start/complete) |
+| `SchemaSyncWorker` | Background periodic consistency check with optional auto-repair |
+| `SchemaSyncReporter` | Human-readable sync progress and status reports |
+| `SchemaSyncCLI` | CLI commands for manual sync operations |
+| `SchemaSyncSchema` | SQL schema for coordination database tables (`schema_sync_state`, `shard_schema_versions`, `schema_sync_locks`, `migration_checksums`) |
+
+### Sync Workflow
+
+1. **Validate** input, check for existing in-progress sync (distributed lock)
+2. **Lock** — acquire global sync lock to prevent concurrent operations
+3. **Prepare** — create sync operation record, calculate migration checksum
+4. **Check** — read current schema version for each shard, identify shards needing updates
+5. **Apply** — apply migration SQL to each shard (sequential or parallel), record version/checksum
+6. **Validate** — verify all shards have matching version and checksum; generate consistency report
+7. **Complete** — mark operation completed/failed/rolled-back, invoke hooks, release lock
+
+### Error Handling
+
+- **Transient errors** (connection, timeout, deadlock): retried with exponential backoff
+- **Permanent errors** (SQL syntax, constraint, permission): fail immediately
+- **Partial failures**: controlled by `continueOnError` — stop on first error or continue and report all
+- **Rollback**: automatically rolled back on failure when `continueOnError: false`; manually triggered via `rollback()`
+
+### Usage Examples
+
+**Basic sync:**
+```javascript
+await db.schemaSync.sync([{
+    id: "001_create_users",
+    name: "Create users table",
+    up: "CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL)",
+    down: "DROP TABLE users",
+}]);
+```
+
+**Validate and repair:**
+```javascript
+const report = await db.schemaSync.validate();
+if (!report.isConsistent) {
+    console.warn(`${report.inconsistentShards.length} inconsistent, ${report.missingShards.length} missing`);
+    for (const shardId of report.missingShards) {
+        await db.schemaSync.repair(shardId); // available via SchemaSyncService
+    }
+}
+```
+
+**Block writes on inconsistency:**
+```javascript
+const db = createDatabase({
+    sharding: { enabled: true, strategy: "hash", shards: [...] },
+    schemaSync: {
+        enabled: true,
+        coordinationPool,
+        blockWritesOnInconsistency: true,
+    },
+});
+
+// Writes to a shard with a stale schema throw SchemaInconsistencyError
+try {
+    await db.query("INSERT INTO users (name) VALUES ($1)", ["Alice"]);
+} catch (error) {
+    if (error.message.includes("schema inconsistency")) {
+        await db.schemaSync.sync();
+        await db.query("INSERT INTO users (name) VALUES ($1)", ["Alice"]);
+    }
+}
+```
+
+---
+
 ## Failover
 
 High-availability support for PostgreSQL clusters with primary/replica failover. The failover layer is a standalone `FailoverManager` that runs health checks, detects primary failures, and orchestrates automatic or manual failover by promoting a replica.
@@ -2429,6 +2604,136 @@ await cleanupManager.cleanupOrphanedTransactions();
 
 // Clean up all old prepared transactions
 await cleanupManager.cleanupOldTransactions();
+```
+
+### Distributed Tx Connection Management
+
+Distributed transactions hold one connection per participant shard for the entire transaction lifetime. Under high concurrency this can exhaust connection pools. The package provides connection management primitives to prevent pool exhaustion:
+
+#### TransactionSemaphore
+
+Limits the number of concurrent distributed transactions. When the limit is reached, additional transactions queue and wait for a slot.
+
+```javascript
+import { TransactionSemaphore } from "@oneunit/database";
+
+const semaphore = new TransactionSemaphore({
+    maxConcurrent: 5,        // Max concurrent distributed transactions (default: 5)
+    timeoutMs: 30_000,       // Max time to wait for a slot (default: 30s)
+});
+
+const release = await semaphore.acquire("tx-123");
+try {
+    // run distributed transaction
+} finally {
+    release(); // frees the slot
+}
+
+console.log(semaphore.getActiveCount());   // active transactions
+console.log(semaphore.getQueueLength());   // queued transactions
+console.log(semaphore.isFull());           // at capacity?
+```
+
+#### CircuitBreaker
+
+Wraps a `PoolMonitor` and opens (blocks new transactions) when any pool's utilization exceeds a threshold. Transitions `CLOSED` → `OPEN` → `HALF_OPEN` → `CLOSED` as pool pressure eases.
+
+```javascript
+import { CircuitBreaker } from "@oneunit/database";
+import { PoolMonitor } from "@oneunit/database/client";
+
+const poolMonitor = new PoolMonitor(allPools, {
+    warningThreshold: 0.8,  // warn at 80% utilization
+    errorThreshold: 0.95,   // error at 95%
+    checkIntervalMs: 5_000,
+});
+poolMonitor.start();
+
+const breaker = new CircuitBreaker(poolMonitor, {
+    openThreshold: 0.9,     // open circuit at 90% utilization
+    resetTimeoutMs: 30_000, // retry after 30s
+    checkIntervalMs: 5_000,
+});
+breaker.start();
+
+if (!breaker.canExecute()) {
+    // pool exhausted — block new distributed transactions
+}
+console.log(breaker.getState()); // "CLOSED" | "OPEN" | "HALF_OPEN"
+breaker.stop();
+```
+
+#### ConnectionThrottler
+
+Limits the number of connections a single distributed transaction can hold across all shards, preventing one transaction from monopolizing a pool.
+
+```javascript
+import { ConnectionThrottler } from "@oneunit/database";
+
+const throttler = new ConnectionThrottler({
+    maxConnectionsPerTransaction: 100, // default: 100
+});
+
+await throttler.acquire("tx-123");
+// ... execute statements ...
+throttler.release("tx-123");
+```
+
+#### DistributedTransactionManager
+
+A wrapper around `DistributedTransactionCoordinator` that combines the semaphore, circuit breaker, and pool monitor into a single managed transaction entry point.
+
+```javascript
+import { DistributedTransactionManager, PoolMonitor } from "@oneunit/database";
+
+const poolMonitor = new PoolMonitor(shardPools);
+poolMonitor.start();
+
+const manager = new DistributedTransactionManager(coordinator, {
+    poolMonitor,
+    maxConcurrentTransactions: 5,
+});
+
+const result = await manager.transaction(async (tx) => {
+    await tx.execute({ shardId: "shard-1" }, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", [100, "user-1"]);
+    await tx.execute({ shardId: "shard-2" }, "UPDATE accounts SET balance = balance + $1 WHERE id = $2", [100, "user-2"]);
+});
+
+console.log(manager.getStatus());
+// {
+//   activeTransactions: 2,
+//   queuedTransactions: 0,
+//   circuitState: "CLOSED",
+//   averagePoolUtilization: 0.45,
+//   maxPoolUtilization: 0.62
+// }
+
+manager.shutdown();
+```
+
+#### PoolMonitor
+
+Tracks per-pool connection utilization (total, idle, waiting, active, max) and notifies listeners. Used by the circuit breaker and useful for standalone monitoring.
+
+```javascript
+import { PoolMonitor } from "@oneunit/database/client";
+
+const poolMonitor = new PoolMonitor(new Map([["shard-1", pool1], ["shard-2", pool2]]), {
+    warningThreshold: 0.8,
+    errorThreshold: 0.95,
+    checkIntervalMs: 5_000,
+});
+poolMonitor.start();
+
+poolMonitor.onStats((stats) => {
+    console.log(`${stats.poolId}: ${(stats.utilization * 100).toFixed(1)}% utilization`);
+});
+
+const stats = poolMonitor.getAllStats();
+console.log(poolMonitor.getAverageUtilization());
+console.log(poolMonitor.getMaxUtilization());
+console.log(poolMonitor.isNearExhaustion(0.9));
+poolMonitor.stop();
 ```
 
 ### PostgreSQL Configuration
