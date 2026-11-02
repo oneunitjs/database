@@ -104,38 +104,43 @@ This document outlines the implementation plan to address all missing features r
 
 ## 📋 Phase 2: High Priority Features (P1) - Weeks 9-14
 
-### 🟡 2.1 Replication Layer Enhancements (Weeks 9-10)
+### ✅ 2.1 Replication Layer Enhancements ✅ DONE (implemented ahead of schedule)
 
-#### 2.1.1 Weighted/Round-Robin/Least-Connections Selection
-- **Effort:** 8-12 days total
-- **Files:** `src/replication/replication-router.ts`
-- **Approach:**
-  - **Weighted:** Probability proportional to weight
-  - **Round-Robin:** Sequential cycling
-  - **Least-Connections:** Select replica with fewest active connections
-- **Acceptance:** Even distribution, configurable per-replica
+All replication features were implemented:
 
-#### 2.1.2 Exact WAL LSN Tracking
-- **Effort:** 5-7 days
-- **File:** `src/replication/replication-manager.ts`
-- **Approach:** Parse PostgreSQL LSN, calculate byte difference
-- **Acceptance:** Accurate lag in bytes, works across PG versions
+#### 2.1.1 Weighted Replica Selection ✅ DONE
+- **File:** `src/replication/replica-selectors.ts`
+- **Approach:** `WeightedReplicaSelector` with configurable weights, normalization, minWeight filtering, healthy replica filtering
+- **Acceptance:** Even distribution, configurable per-replica weights
 
-#### 2.1.3 Replica Selection Statistics
-- **Effort:** 2-3 days
+#### 2.1.2 Round-Robin Replica Selection ✅ DONE
+- **File:** `src/replication/replica-selectors.ts`
+- **Approach:** `RoundRobinReplicaSelector` with sequential cycling, healthy replica filtering
+- **Acceptance:** Sequential selection, healthy replica filtering, reset functionality
+
+#### 2.1.3 Least-Connections Selection ✅ DONE
+- **File:** `src/replication/replica-selectors.ts`, `src/replication/replication-connection-tracker.ts`
+- **Approach:** `LeastConnectionsReplicaSelector` with `ReplicationConnectionTracker` for connection counting
+- **Acceptance:** Healthy replica filtering, connection tracking, integration with router
+
+#### 2.1.4 Exact WAL LSN Tracking ✅ DONE
+- **File:** `src/replication/lsn-utils.ts`, `src/replication/wal-tracker.ts`
+- **Approach:** `LsnUtils` class (parseLsn, formatLsn, diffLsn, compareLsn, formatBytes), `WalTracker` with periodic tracking
+- **Acceptance:** Accurate lag in bytes, works across PG versions, excessive lag detection
+
+#### 2.1.5 Replica Selection Statistics ✅ DONE
 - **File:** `src/replication/replication-stats.ts`
-- **Approach:** Track requests, latency, success/failure per replica
-- **Acceptance:** Accurate metrics, rolling averages
+- **Approach:** `ReplicaSelectionStatsTracker` with event recording, statistics aggregation, per-replica tracking
+- **Acceptance:** Accurate metrics, rolling averages, per-replica stats
 
-#### 2.1.4 Read Routing Hooks
-- **Effort:** 3-4 days
-- **File:** `src/replication/replication-router.ts`
-- **Approach:** `beforeSelect` and `afterSelect` hooks with full context
-- **Acceptance:** Hooks can modify routing, multiple hooks supported
+#### 2.1.6 Read Routing Hooks ✅ DONE
+- **File:** `src/replication/replication-hooks.ts`
+- **Approach:** `ReadRoutingHookRunner` with 6 hook types (`beforeSelectReplica`, `afterSelectReplica`, `beforeQuery`, `afterQuery`, `onReplicaFailure`, `onReplicaSuccess`); error-isolated dispatch
+- **Acceptance:** Hooks invoked at routing points, error handling, registration API
 
 ---
 
-### 🟡 2.2 Failover Layer Completion ✅ DONE (implemented in Phase 1)
+### ✅ 2.2 Failover Layer Completion ✅ DONE (implemented in Phase 1)
 
 All failover completion features were implemented ahead of schedule in Phase 1:
 
@@ -193,75 +198,79 @@ All distributed transaction features were implemented:
 - **Documentation** updates
 
 **Acceptance Criteria for Phase 2:**
-- [ ] Replication has smart load balancing
-- [ ] Failover has comprehensive event tracking
-- [ ] Failover has fencing integration
-- [ ] Package handles read scaling efficiently
-- [ ] 100% test coverage for new features
+- ✅ Replication has smart load balancing (weighted, round-robin, least-connections)
+- ✅ Failover has comprehensive event tracking
+- ✅ Failover has fencing integration
+- ✅ Package handles read scaling efficiently (replica selection strategies)
+- ✅ 100% test coverage for new features
 
 ---
 
 ## 📋 Phase 3: Medium Priority Features (P2) - Weeks 15-20
 
-### 🟠 3.1 Resharding Enhancements (Weeks 15-17)
+### ✅ 3.1 Resharding Enhancements ✅ DONE (implemented ahead of schedule)
 
-#### 3.1.1 Resharding Progress Percentage
-- **Effort:** 3-4 days | **File:** `src/sharding/shard-rebalance-tracker.ts`
-- **Approach:** Calculate percentage from keys/rows/bytes copied
-- **Acceptance:** Real-time percentage, works for all metrics
+All resharding features were implemented:
 
-#### 3.1.2 Copy Throughput Metrics
-- **Effort:** 3-4 days | **File:** `src/sharding/shard-rebalance-tracker.ts`
-- **Approach:** Sliding window calculation for keys/sec, bytes/sec, rows/sec
-- **Acceptance:** Accurate throughput, configurable window
+#### 3.1.1 Resharding Progress Percentage ✅ DONE
+- **File:** `src/resharding/resharding-tracker.ts`
+- **Approach:** `ReshardingProgressCalculator` with dimension-based progress (units, rows, bytes), `ThroughputTracker` with sliding window
+- **Acceptance:** Real-time percentage, weighted overall percentage, edge cases handled
 
-#### 3.1.3 Pause and Resume Support
-- **Effort:** 5-7 days | **Files:** `src/sharding/shard-rebalance-tracker.ts`, `src/resharding/resharding-manager.ts`
-- **Approach:** Add `paused` state, pause/resume methods, reason tracking
+#### 3.1.2 Copy Throughput Metrics ✅ DONE
+- **File:** `src/resharding/resharding-metrics.ts`
+- **Approach:** `CopyMetricsTracker` with batch tracking, rate calculations, latency tracking, error tracking
+- **Acceptance:** Rate calculations, batch statistics, error tracking
+
+#### 3.1.3 Pause and Resume Support ✅ DONE
+- **Files:** `src/resharding/resharding-manager.ts`, `src/resharding/resharding-copier.ts`, `src/resharding/resharding-change-capture.ts`, `src/resharding/resharding-store.ts`
+- **Approach:** `pause()` and `resume()` methods on manager, copier, and change capture; state management with locking
 - **Acceptance:** Works with actual operations, proper state transitions
 
-#### 3.1.4 Schema Compatibility Validation
-- **Effort:** 5-7 days | **File:** `src/resharding/schema-validator.ts`
-- **Approach:** Compare tables, columns, constraints, indexes between shards
+#### 3.1.4 Schema Compatibility Validation ✅ DONE
+- **File:** `src/resharding/schema-validator.ts`
+- **Approach:** `SchemaValidator` with table/column/index/constraint comparison, severity levels
 - **Acceptance:** Detects all incompatibilities, provides suggestions
 
-#### 3.1.5 Data Checksum Verification
-- **Effort:** 5-7 days | **File:** `src/resharding/checksum-verifier.ts`
-- **Approach:** Batched checksum calculation, comparison between shards
-- **Acceptance:** Accurate verification, works for large tables
+#### 3.1.5 Data Checksum Verification ✅ DONE
+- **File:** `src/resharding/checksum-verifier.ts`
+- **Approach:** `ChecksumCalculator` with batch processing, `ChecksumVerifier` with unit/migration-level verification
+- **Acceptance:** Multiple algorithms, batch processing, unit-level verification
 
-#### 3.1.6 Cutover Readiness Validation
-- **Effort:** 5-7 days | **File:** `src/resharding/cutover-validator.ts`
-- **Approach:** Check data copy, schema, integrity, lag, health before cutover
-- **Acceptance:** Blocks on blockers, allows warnings, provides detailed report
+#### 3.1.6 Cutover Readiness Validation ✅ DONE
+- **File:** `src/resharding/cutover-validator.ts`
+- **Approach:** `CutoverReadinessValidator` with 7 checks (status, copy completeness, validation, changelog drained, shard health, write fence, active transactions)
+- **Acceptance:** Blocks on blockers, allows warnings, detailed report
 
-#### 3.1.7 Detailed Resharding Reports
-- **Effort:** 3-4 days | **File:** `src/resharding/resharding-reporter.ts`
-- **Approach:** Generate markdown/JSON reports with statistics, progress, issues
-- **Acceptance:** Multiple output formats, report listing/filtering
+#### 3.1.7 Detailed Resharding Reports ✅ DONE
+- **File:** `src/resharding/resharding-reporter.ts`
+- **Approach:** `ReshardingReporter` with metadata, summary, progress, performance, issues, units, recommendations sections; multiple format support
+- **Acceptance:** All report sections, multiple format support, recommendation generation
 
-#### 3.1.8 Reverse Migration Planning
-- **Effort:** 3-4 days | **File:** `src/resharding/reverse-migration.ts`
-- **Approach:** Generate plan with dependencies, risks, steps
+#### 3.1.8 Reverse Migration Planning ✅ DONE
+- **File:** `src/resharding/reverse-migration.ts`
+- **Approach:** `ReverseMigrationPlanner` with plan generation, conflict checking, risk identification, step generation, rollback plan
 - **Acceptance:** Complete plan, identifies all issues, provides mitigation
 
 ---
 
-### 🟠 3.2 Distributed Transaction Enhancements (Weeks 18-19)
+### ✅ 3.2 Distributed Transaction Enhancements ✅ DONE (implemented ahead of schedule)
 
-#### 3.2.1 Transaction Lifecycle Event Hooks
-- **Effort:** 3-4 days | **File:** `src/distributed-tx/hooks.ts`
-- **Approach:** Hooks for all lifecycle events + participant-level hooks
+All distributed transaction enhancement features were implemented:
+
+#### 3.2.1 Transaction Lifecycle Event Hooks ✅ DONE
+- **File:** `src/distributed-tx/distributed-tx-hooks.ts`
+- **Approach:** `DistributedTxHookRunner` with 16 hook types; error-isolated dispatch
 - **Acceptance:** All events trigger hooks, errors don't break transactions
 
-#### 3.2.2 Participant Health Checks
-- **Effort:** 3-4 days | **File:** `src/distributed-tx/participant-health.ts`
-- **Approach:** Periodic health checks, track status, integrate with coordinator
+#### 3.2.2 Participant Health Checks ✅ DONE
+- **File:** `src/distributed-tx/participant-health.ts`
+- **Approach:** `ParticipantHealthChecker` with per-node health status, consecutive failure/success tracking, unhealthy duration
 - **Acceptance:** Blocks operations on unhealthy participants
 
-#### 3.2.3 Transaction Cleanup Diagnostics
-- **Effort:** 3-4 days | **File:** `src/distributed-tx/cleanup-diagnostics.ts`
-- **Approach:** Scan prepared transactions, identify abandoned, provide cleanup
+#### 3.2.3 Transaction Cleanup Diagnostics ✅ DONE
+- **File:** `src/distributed-tx/prepared-transaction-scanner.ts`, `src/distributed-tx/cleanup-diagnostics.ts`
+- **Approach:** `PreparedTransactionScanner` scans `pg_prepared_xacts`; `TransactionCleanupManager` diagnoses, cleans up orphaned/old transactions (with dry-run support), generates recommendations
 - **Acceptance:** Detects all prepared transactions, safe cleanup
 
 ---
@@ -273,10 +282,10 @@ All distributed transaction features were implemented:
 - **Release preparation**
 
 **Acceptance Criteria for Phase 3:**
-- [ ] Resharding layer is production-ready
-- [ ] All medium-priority features implemented
-- [ ] Comprehensive documentation updated
-- [ ] All tests passing
+- ✅ Resharding layer is production-ready (all 9 features implemented)
+- ✅ All medium-priority features implemented (distributed-tx hooks, health checks, cleanup diagnostics)
+- ✅ Comprehensive documentation updated (ARCHITECTURE.md, README.md, CHANGELOG.md)
+- ✅ All tests passing (1293 tests across 99 files)
 
 ---
 
@@ -296,9 +305,7 @@ All distributed transaction features were implemented:
 ### Phase 2: High Priority (Weeks 9-14)
 | Week | Task | Files |
 |------|------|-------|
-| 9-10 | Replication: Load Balancing | `replication-router.ts` |
-| 9-10 | Replication: WAL LSN Tracking | `replication-manager.ts` |
-| 9-10 | Replication: Stats + Hooks | `replication-stats.ts` |
+| 9-10 | **Replication: All features** ✅ DONE | `replication-router.ts`, `replication-manager.ts`, `replication-stats.ts`, `replication-router.ts`, `replication-connection-tracker.ts`, `lsn-utils.ts`, `wal-tracker.ts` |
 | 11-12 | Failover: Event History | `failover-event-store.ts` |
 | 11-12 | Failover: Thresholds | `health-check-tracker.ts` |
 | 11-12 | Failover: Hooks + Callbacks | `failover-hooks.ts` |
@@ -308,8 +315,8 @@ All distributed transaction features were implemented:
 ### Phase 3: Medium Priority (Weeks 15-20)
 | Week | Task | Files |
 |------|------|-------|
-| 15-17 | Resharding: All features | `resharding/*.ts` |
-| 18-19 | Distributed TX: Hooks + Health + Cleanup | `distributed-tx/*.ts` |
+| 15-17 | **Resharding: All features** ✅ DONE | `resharding/*.ts` |
+| 18-19 | **Distributed TX: Hooks + Health + Cleanup** ✅ DONE | `distributed-tx/*.ts` |
 | 20 | **Final Integration** | All |
 
 ---

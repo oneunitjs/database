@@ -1504,7 +1504,7 @@ The `db.sharding` surface exposes:
 - `rebalanceTracker` — ShardRebalanceTracker instance for managing rebalance operations
 - `isClosed`
 
-### ShardRebalanceTracker (`sharding/shard-rebalance-tracker.ts`)
+### ShardRebalanceTracker (`resharding/resharding-tracker.ts`)
 
 In-memory tracker for shard rebalance progress, providing primitives for creating, updating, querying, and completing rebalance operations. **Note**: This is an in-memory implementation — for production use, wrap with persistent storage.
 

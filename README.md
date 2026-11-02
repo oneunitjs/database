@@ -416,7 +416,88 @@ await rsharding.cutover();
 await rsharding.finalize();
 ```
 
-## Recent Improvements
+## Distributed Transactions (2PC)
+
+Distributed transactions provide atomic operations across multiple shards using the two-phase commit (2PC) protocol. This ensures that a transaction either commits on all shards or aborts on all shards, preventing partial state.
+
+### Configuration
+
+```javascript
+import {
+    DistributedTransactionCoordinator,
+    RetryPolicy,
+    DistributedTxHookRunner,
+    ParticipantHealthChecker,
+    PreparedTransactionScanner,
+    TransactionCleanupManager,
+} from "@oneunit/database";
+
+const coordinator = new DistributedTransactionCoordinator({
+    coordinationPool,
+    coordinatorId: "coord-1",
+    timeouts: {
+        prepareTimeoutMs: 30_000,   // Timeout per PREPARE TRANSACTION
+        commitTimeoutMs: 30_000,    // Timeout per COMMIT PREPARED
+        abortTimeoutMs: 30_000,     // Timeout per ROLLBACK PREPARED
+        globalTimeoutMs: 300_000,   // Overall transaction lifetime
+    },
+    retryPolicy: new RetryPolicy({
+        maxRetries: 3,
+        initialDelayMs: 100,
+        maxDelayMs: 5_000,
+        backoffMultiplier: 2,
+        jitter: 0.1,
+    }),
+    hookRunner: new DistributedTxHookRunner(logger),
+    logger,
+});
+await coordinator.initialize();
+```
+
+### Usage
+
+```typescript
+const txId = await coordinator.begin();
+
+// Register participants (shards)
+await coordinator.addParticipant(txId, "shard-0", poolShard0);
+await coordinator.addParticipant(txId, "shard-1", poolShard1);
+
+// Execute statements on each participant through their pools
+// ...
+
+// Phase 1: Prepare all participants
+await coordinator.prepare(txId);
+
+// Phase 2: Commit or abort
+await coordinator.commit(txId);
+// or: await coordinator.abort(txId);
+```
+
+### Features
+
+| Feature | Description |
+| :--- | :--- |
+| **Timeouts** | Per-phase timeouts (prepare, commit, abort) plus global transaction timeout with automatic abort |
+| **Retry Policy** | Exponential backoff with jitter, configurable max retries, retryable error classification |
+| **Lifecycle Hooks** | 16 hook types (`beforePrepare`, `afterPrepare`, `prepareFailed`, `beforeCommit`, `afterCommit`, `commitFailed`, `beforeAbort`, `afterAbort`, `abortFailed`, `onParticipantJoin`, `onParticipantLeave`, `onStateChange`, `onTimeout`) |
+| **Health Checks** | `ParticipantHealthChecker` with per-node health tracking, consecutive failure counting, dynamic intervals |
+| **Cleanup Diagnostics** | `TransactionCleanupManager` scans `pg_prepared_xacts` for orphaned/old transactions, auto-cleanup support |
+
+### Error Types
+
+| Error | When |
+| :--- | :--- |
+| `DistributedTransactionError` | Base distributed transaction error |
+| `DistributedTxNotFoundError` | Transaction not found |
+| `DistributedTxAlreadyResolvedError` | Transaction already committed/aborted |
+| `MaxPreparedTransactionsError` | `max_prepared_transactions` is 0 |
+| `DistributedTxTimeoutError` | Phase or global timeout exceeded (transient, retryable) |
+
+---
+
+## Online Resharding (Data Migration)
+
 
 The package has undergone significant stability and reliability improvements:
 

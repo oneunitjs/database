@@ -8,6 +8,23 @@
 - **Sharding:** Added `registerShardStrategy()` function to register custom shard strategies dynamically
 - **Sharding:** Added `ShardRebalanceProgress` type for tracking rebalance state including moved/failed/skipped keys, percentage, status, and timestamps
 - **Sharding:** Enhanced exports in `db.sharding` to include `rebalanceTracker` for managing rebalance operations
+- **Resharding:** Added `ReshardingManager` for durable online data migration lifecycle (plan → start → copy → validate → cutover → finalize)
+- **Resharding:** Added `ReshardingPlanner` with `planResharding()` for unit generation across all sharding strategies
+- **Resharding:** Added `ReshardingCopier` with keyset-paginated batch copy, resumable checkpoints, concurrency control
+- **Resharding:** Added `ReshardingCutover` with coordinated cutover (drain, fence, publish new routing version)
+- **Resharding:** Added `ReshardingChangeCapture` with transactional outlog (`resharding_changes`) for CDC
+- **Resharding:** Added `ReshardingStore` for durable coordination state persistence
+- **Resharding:** Added `ReshardingProgressCalculator` with dimension-based progress (units, rows, bytes) and weighted overall percentage
+- **Resharding:** Added `ThroughputTracker` with sliding window statistics and time-remaining estimation
+- **Resharding:** Added `CopyMetricsTracker` with batch tracking, rate calculations, latency tracking, error tracking
+- **Resharding:** Added `ReshardingSchema` with schema versioning and write gate table
+- **Resharding:** Added `SchemaValidator` with table/column/constraint/index comparison and severity levels
+- **Resharding:** Added `ChecksumVerifier` and `ChecksumCalculator` with multiple algorithms, batch processing
+- **Resharding:** Added `CutoverReadinessValidator` with 7 checks (status, copy completeness, validation, changelog, shard health, write fence, active transactions)
+- **Resharding:** Added `ReshardingReporter` with multiple format support (markdown/JSON/HTML), recommendations
+- **Resharding:** Added `ReverseMigrationPlanner` with plan generation, conflict checking, risk identification, step generation
+- **Resharding:** Added `ReshardingErrors` with `ReshardingError`, `UnsupportedStrategyError`
+- **Resharding:** Exported types: `MigrationDescriptor`, `ReshardingApi`, `UnitStatus`, `Unit`, `ReplicaStatus`, etc.
 - **Column Helpers:** Added SQL injection protection in `enumColumn()` helper - now properly escapes single quotes in enum values
 - **Replication:** Added comprehensive replication support with `ReplicationManager` and `ReplicationRouter` for primary/read-replica routing
 - **Replication:** Added `readPreference` support: `"primary"`, `"replica-preferred"`, `"replica-only"` for flexible read routing
