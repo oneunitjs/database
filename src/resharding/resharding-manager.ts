@@ -41,6 +41,13 @@ import { ReshardingCopier } from "./resharding-copier.js";
 import { ReshardingChangeCapture } from "./resharding-change-capture.js";
 import { ReshardingCutover } from "./resharding-cutover.js";
 import type { ShardManager } from "../sharding/shard-manager.js";
+import { ReshardingProgressCalculator, type ReshardingProgress } from "./resharding-tracker.js";
+import { CopyMetricsTracker, type CopyMetrics } from "./resharding-metrics.js";
+import { SchemaValidator, type SchemaCompatibilityReport, type TableSchema } from "./schema-validator.js";
+import { ChecksumVerifier, type ChecksumComparison } from "./checksum-verifier.js";
+import { CutoverReadinessValidator, type CutoverReadinessReport, type CutoverReadinessInput } from "./cutover-validator.js";
+import { ReshardingReporter, type ReshardingReport, type ReshardingReportFormat } from "./resharding-reporter.js";
+import { ReverseMigrationPlanner, type ReverseMigrationPlan } from "./reverse-migration.js";
 
 const LEGAL_TRANSITIONS: Record<ReshardingStatus, Set<ReshardingStatus>> = {
     planned: new Set(["copying", "paused", "cancelled", "failed"]),
@@ -80,6 +87,14 @@ export class ReshardingManager implements ReshardingApi {
     private activeMigrationId: string | null = null;
     private coordinationInitialized = false;
     private coordinationInitPromise: Promise<void> | null = null;
+    private readonly pauseFromStatus = new Map<string, ReshardingStatus>();
+    private readonly progressCalculator = new ReshardingProgressCalculator();
+    private readonly copyMetrics = new CopyMetricsTracker();
+    private readonly schemaValidator = new SchemaValidator();
+    private readonly checksumVerifier = new ChecksumVerifier();
+    private readonly cutoverValidator = new CutoverReadinessValidator();
+    private readonly reporter = new ReshardingReporter();
+    private readonly reversePlanner = new ReverseMigrationPlanner();
 
     constructor(
         coordination: ReshardingOptions["coordination"],
@@ -138,6 +153,7 @@ export class ReshardingManager implements ReshardingApi {
             this.logger,
             this.hooks,
             this.initShard.bind(this),
+            this.copyMetrics,
         );
         this.cutoverEngine = new ReshardingCutover(
             this.coordination,
@@ -257,15 +273,23 @@ export class ReshardingManager implements ReshardingApi {
         return this.buildStatus(this.activeMigrationId);
     }
 
-    async pause(): Promise<ReshardingStatusInfo> {
+    async pause(reason = "operator"): Promise<ReshardingStatusInfo> {
         const migrationId = this.requireActive();
         const row = await this.store.requireMigration(migrationId);
         const allowed: ReshardingStatus[] = ["copying", "catching_up", "validating", "ready_for_cutover"];
         if (!allowed.includes(row.status as ReshardingStatus)) {
             throw new InvalidStateTransitionError(migrationId, row.status, "paused");
         }
+        this.pauseFromStatus.set(migrationId, row.status as ReshardingStatus);
+        this.copier.pause(reason);
+        this.changeCapture.pause();
         await this.store.transition(migrationId, row.status, "paused", row.version);
-        this.emitProgress({ type: "phase-changed", migrationId, timestamp: nowIso(), detail: { phase: "paused" } });
+        this.emitProgress({
+            type: "phase-changed",
+            migrationId,
+            timestamp: nowIso(),
+            detail: { phase: "paused", reason, from: row.status },
+        });
         return this.buildStatus(migrationId);
     }
 
@@ -275,9 +299,43 @@ export class ReshardingManager implements ReshardingApi {
         if (row.status !== "paused") {
             throw new InvalidStateTransitionError(migrationId, row.status, "copying/catching_up/validating");
         }
+        const target = this.resolveResumeTarget(migrationId, row);
         await this.store.claimWorkerLock(migrationId);
-        await this.store.transition(migrationId, "paused", "copying", row.version);
+        await this.store.transition(migrationId, "paused", target, row.version);
+        this.copier.resume();
+        this.changeCapture.resume();
+        this.pauseFromStatus.delete(migrationId);
+        this.emitProgress({
+            type: "phase-changed",
+            migrationId,
+            timestamp: nowIso(),
+            detail: { phase: target, resumed: true },
+        });
         return this.buildStatus(migrationId);
+    }
+
+    private resolveResumeTarget(
+        migrationId: string,
+        row: { units: MigrationUnit[] },
+    ): ReshardingStatus {
+        const remembered = this.pauseFromStatus.get(migrationId);
+        if (remembered && remembered !== "paused") {
+            if (remembered === "ready_for_cutover") {
+                return "validating";
+            }
+            return remembered;
+        }
+        const statuses = new Set(row.units.map((u) => u.status));
+        if (statuses.has("planned") || statuses.has("copying")) {
+            return "copying";
+        }
+        if (statuses.has("caught_up")) {
+            return "catching_up";
+        }
+        if (statuses.has("validated")) {
+            return "validating";
+        }
+        return "copying";
     }
 
     async cancel(): Promise<ReshardingStatusInfo> {
@@ -716,6 +774,80 @@ export class ReshardingManager implements ReshardingApi {
             routingVersion: liveVersion,
             capturedAt: nowIso(),
         };
+    }
+
+    async getProgress(): Promise<ReshardingProgress | undefined> {
+        const status = await this.getStatus();
+        if (!status) {
+            return undefined;
+        }
+        return this.progressCalculator.calculate(status);
+    }
+
+    async getMigrationProgress(migrationId: string): Promise<ReshardingProgress> {
+        const status = await this.buildStatus(migrationId);
+        return this.progressCalculator.calculate(status);
+    }
+
+    getCopyMetrics(): CopyMetrics {
+        return this.copyMetrics.snapshot();
+    }
+
+    validateDestinationSchema(
+        sourceTables: TableSchema[],
+        destinationTables: TableSchema[],
+        options?: { strict?: boolean },
+    ): SchemaCompatibilityReport {
+        return this.schemaValidator.validate(sourceTables, destinationTables, options);
+    }
+
+    isDestinationSchemaCompatible(
+        sourceTables: TableSchema[],
+        destinationTables: TableSchema[],
+    ): boolean {
+        return this.schemaValidator.validate(sourceTables, destinationTables).compatible;
+    }
+
+    verifyUnitChecksums(
+        sourceRows: ReadonlyArray<Record<string, unknown>>,
+        destinationRows: ReadonlyArray<Record<string, unknown>>,
+    ): ChecksumComparison {
+        return this.checksumVerifier.compare(sourceRows, destinationRows);
+    }
+
+    async checkCutoverReadiness(
+        options?: { strict?: boolean } & Omit<CutoverReadinessInput, "status">,
+    ): Promise<CutoverReadinessReport> {
+        const status = await this.getStatus();
+        if (!status) {
+            throw new MigrationNotFoundError("no active migration");
+        }
+        const { strict, ...input } = options ?? {};
+        return this.cutoverValidator.validate({ status, ...input }, { strict });
+    }
+
+    async generateReport(format: ReshardingReportFormat = "json"): Promise<string> {
+        const status = await this.getStatus();
+        if (!status) {
+            throw new MigrationNotFoundError("no active migration");
+        }
+        const progress = this.progressCalculator.calculate(status);
+        const report = this.reporter.generate(status, {
+            progress,
+            metrics: this.copyMetrics.snapshot(),
+        });
+        return this.reporter.format(report, format);
+    }
+
+    generateReshardingReport(status: ReshardingStatusInfo): ReshardingReport {
+        return this.reporter.generate(status, {
+            progress: this.progressCalculator.calculate(status),
+            metrics: this.copyMetrics.snapshot(),
+        });
+    }
+
+    planReverseMigration(plan: ReshardingPlan, reverseMigrationId?: string): ReverseMigrationPlan {
+        return this.reversePlanner.plan(plan, { reverseMigrationId });
     }
 
     private emitProgress(event: ProgressEvent): void {

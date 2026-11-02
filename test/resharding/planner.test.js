@@ -3,12 +3,12 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
     topologyFromConfig,
     planResharding,
-} from "../../../src/resharding/resharding-planner.js";
+} from "../../src/resharding/resharding-planner.ts";
 
 import {
     UnsupportedStrategyError,
     StalePlanError,
-} from "../../../src/resharding/resharding-errors.js";
+} from "../../src/resharding/resharding-errors.ts";
 function shard(id, version = 1, extra = {}) {
     return {
         id,

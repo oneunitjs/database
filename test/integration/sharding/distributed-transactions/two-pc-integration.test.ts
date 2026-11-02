@@ -26,11 +26,15 @@ import { DistributedTransactionCoordinator } from "../../../../src/distributed-t
 import { Pool } from "pg";
 
 const SHARDS = [
-    { id: "shard-0", host: "127.0.0.1", port: 5440, user: "postgres", database: "dtc_test" },
-    { id: "shard-1", host: "127.0.0.1", port: 5441, user: "postgres", database: "dtc_test" },
-    { id: "shard-2", host: "127.0.0.1", port: 5442, user: "postgres", database: "dtc_test" },
+    { id: "shard-0", host: "127.0.0.1", port: 5440, user: "postgres",
+                password: "postgres", database: "dtc_test" },
+    { id: "shard-1", host: "127.0.0.1", port: 5441, user: "postgres",
+                password: "postgres", database: "dtc_test" },
+    { id: "shard-2", host: "127.0.0.1", port: 5442, user: "postgres",
+                password: "postgres", database: "dtc_test" },
 ];
-const COORD = { host: "127.0.0.1", port: 5443, user: "postgres", database: "coordination" };
+const COORD = { host: "127.0.0.1", port: 5443, user: "postgres",
+                password: "postgres", database: "coordination" };
 
 function shardUri(id: string) {
     const s = SHARDS.find((x) => x.id === id)!;

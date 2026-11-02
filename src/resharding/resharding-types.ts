@@ -404,7 +404,22 @@ export interface ReshardingApi {
     /** Start executing an existing plan. Claims the migration worker lock. */
     start(): Promise<ReshardingStatusInfo>;
     getStatus(): Promise<ReshardingStatusInfo | undefined>;
-    pause(): Promise<ReshardingStatusInfo>;
+    getProgress(): Promise<import("./resharding-tracker.js").ReshardingProgress | undefined>;
+    getMigrationProgress(migrationId: string): Promise<import("./resharding-tracker.js").ReshardingProgress>;
+    getCopyMetrics(): import("./resharding-metrics.js").CopyMetrics;
+    validateDestinationSchema(
+        sourceTables: import("./schema-validator.js").TableSchema[],
+        destinationTables: import("./schema-validator.js").TableSchema[],
+        options?: { strict?: boolean },
+    ): import("./schema-validator.js").SchemaCompatibilityReport;
+    verifyUnitChecksums(
+        sourceRows: ReadonlyArray<Record<string, unknown>>,
+        destinationRows: ReadonlyArray<Record<string, unknown>>,
+    ): import("./checksum-verifier.js").ChecksumComparison;
+    checkCutoverReadiness(options?: { strict?: boolean } & Omit<import("./cutover-validator.js").CutoverReadinessInput, "status">): Promise<import("./cutover-validator.js").CutoverReadinessReport>;
+    generateReport(format?: import("./resharding-reporter.js").ReshardingReportFormat): Promise<string>;
+    planReverseMigration(plan: ReshardingPlan, reverseMigrationId?: string): import("./reverse-migration.js").ReverseMigrationPlan;
+    pause(reason?: string): Promise<ReshardingStatusInfo>;
     resume(): Promise<ReshardingStatusInfo>;
     cancel(): Promise<ReshardingStatusInfo>;
     /**

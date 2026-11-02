@@ -242,9 +242,15 @@ export class ReshardingStore {
         try {
             await client.query("BEGIN");
             try {
+                const pauseSql =
+                    to === "paused"
+                        ? ", paused_at = NOW()"
+                        : from === "paused"
+                          ? ", paused_at = NULL"
+                          : "";
                 const result = await client.query(
                     `UPDATE resharding_migrations
-                     SET status = $2, version = version + 1, updated_at = NOW()
+                     SET status = $2, version = version + 1, updated_at = NOW()${pauseSql}
                      WHERE migration_id = $1 AND status = $3 AND version = $4
                      RETURNING version`,
                     [migrationId, to, from, expectedVersion],

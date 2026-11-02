@@ -15,6 +15,10 @@ import {
     WriteToReplicaError,
 } from "./errors.js";
 import { ReplicationRouter } from "./replication-router.js";
+import type { ReplicaSelectionPolicy } from "./replica-selectors.js";
+import { ReplicationConnectionTracker } from "./replication-connection-tracker.js";
+import { ReplicaSelectionStatsTracker } from "./replication-stats.js";
+import { WalTracker, type ReplicationLagInfo, type WalTrackingOptions } from "./wal-tracker.js";
 
 const DEFAULT_PRIMARY_ENDPOINT_ID = "primary";
 const DEFAULT_LAG_QUERY =
@@ -33,6 +37,7 @@ interface EndpointEntry {
     pool: Pool;
     connection: PoolConfig;
     owned: boolean;
+    weight?: number;
 }
 
 interface EndpointLifecycle {
@@ -159,11 +164,14 @@ export interface ReplicationManagerOptions {
     replicas: Array<{
         id: string;
         connection: PoolConfig;
+        weight?: number;
     }>;
     mode: ReadPreference;
     lagThresholdMs?: number;
     healthCheck?: ReplicationHealthCheckConfig;
     logger?: Logger;
+    replicaSelectionPolicy?: ReplicaSelectionPolicy;
+    walTracking?: Partial<WalTrackingOptions> & { enabled?: boolean };
 }
 
 /**
@@ -182,6 +190,9 @@ export class ReplicationManager {
     private readonly logger?: Logger;
     private closed = false;
     private readonly mutex = new Mutex();
+    private readonly connectionTracker = new ReplicationConnectionTracker();
+    private readonly selectionStats = new ReplicaSelectionStatsTracker();
+    private readonly walTracker: WalTracker;
 
     constructor(private readonly options: ReplicationManagerOptions) {
         this.logger = options.logger;
@@ -202,6 +213,7 @@ export class ReplicationManager {
             healthCheck,
         });
 
+        this.walTracker = new WalTracker([], options.logger, options.walTracking);
         this.router = new ReplicationRouter({
             primary: {
                 endpointId: options.primary.endpointId,
@@ -211,6 +223,9 @@ export class ReplicationManager {
             replicas: [],
             mode: options.mode,
             lagThresholdMs: options.lagThresholdMs,
+            replicaSelectionPolicy: options.replicaSelectionPolicy,
+            connectionTracker: this.connectionTracker,
+            statsTracker: this.selectionStats,
         });
 
         // Register primary endpoint (pool supplied externally; not owned unless configured)
@@ -230,6 +245,7 @@ export class ReplicationManager {
                 pool: null as unknown as Pool,
                 connection: replica.connection,
                 owned: true,
+                weight: replica.weight,
             });
             this.lifecycle.set(replica.id, { activeOps: 0, draining: false });
         }
@@ -329,6 +345,9 @@ export class ReplicationManager {
         }
 
         this.syncRouter();
+        if (this.options.walTracking?.enabled) {
+            this.walTracker.start();
+        }
     }
 
     private getEntry(endpointId: string): EndpointEntry | undefined {
@@ -395,6 +414,7 @@ export class ReplicationManager {
             );
         }
         lifecycle.activeOps += 1;
+        this.connectionTracker.acquireConnection(endpointId);
     }
 
     releaseEndpoint(endpointId: string): void {
@@ -405,6 +425,7 @@ export class ReplicationManager {
         if (lifecycle.activeOps > 0) {
             lifecycle.activeOps -= 1;
         }
+        this.connectionTracker.releaseConnection(endpointId);
     }
 
     recordFailure(endpointId: string, error: Error): void {
@@ -594,6 +615,7 @@ export class ReplicationManager {
                 role: "replica" as const,
                 pool: entry.pool!,
                 health: this.healthStates.get(id),
+                weight: entry.weight,
             };
         });
         const primaryEntry = this.endpoints.get(this.options.primary.endpointId)!;
@@ -607,14 +629,31 @@ export class ReplicationManager {
             replicas: replicaEndpoints,
             mode: this.options.mode,
             lagThresholdMs: this.options.lagThresholdMs,
+            replicaSelectionPolicy: this.options.replicaSelectionPolicy,
+            connectionTracker: this.connectionTracker,
+            statsTracker: this.selectionStats,
         });
+        this.walTracker.setEndpoint({
+            endpointId: primaryEntry.endpointId,
+            role: "primary",
+            pool: primaryEntry.pool!,
+        });
+        for (const replica of replicaEndpoints) {
+            if (replica.pool) {
+                this.walTracker.setEndpoint({
+                    endpointId: replica.endpointId,
+                    role: "replica",
+                    pool: replica.pool,
+                });
+            }
+        }
     }
 
     /**
      * Add a replica at runtime. Serialized via mutex. Validates the config and
      * creates its pool.
      */
-    async addReplica(config: { id: string; connection: PoolConfig }): Promise<void> {
+    async addReplica(config: { id: string; connection: PoolConfig; weight?: number }): Promise<void> {
         await this.mutex.acquire();
         try {
             return await this.addReplicaUnlocked(config);
@@ -626,6 +665,7 @@ export class ReplicationManager {
     private async addReplicaUnlocked(config: {
         id: string;
         connection: PoolConfig;
+        weight?: number;
     }): Promise<void> {
         if (this.closed) {
             throw new ReplicationConfigError("Cannot add replica: manager is shut down");
@@ -668,6 +708,7 @@ export class ReplicationManager {
                 pool,
                 connection: config.connection,
                 owned: true,
+                weight: config.weight,
             });
             this.checks.set(config.id, createCheck(pool));
 
@@ -679,7 +720,11 @@ export class ReplicationManager {
                 this.recordFailure(config.id, error);
             });
 
-            this.options.replicas.push({ id: config.id, connection: config.connection });
+            this.options.replicas.push({
+                id: config.id,
+                connection: config.connection,
+                weight: config.weight,
+            });
             this.syncRouter();
 
             this.logger?.info?.(
@@ -769,6 +814,7 @@ export class ReplicationManager {
             this.options.replicas = this.options.replicas.filter(
                 (r) => r.id !== endpointId,
             );
+            this.walTracker.removeEndpoint(endpointId);
             this.syncRouter();
 
             this.logger?.info?.({ endpointId }, "Replica removed");
@@ -799,6 +845,29 @@ export class ReplicationManager {
         return { endpointId: entry.endpointId, role: entry.role, pool: entry.pool };
     }
 
+    getLagInfo(endpointId?: string): ReplicationLagInfo | ReplicationLagInfo[] | null {
+        if (endpointId) {
+            return this.walTracker.getLagInfo(endpointId);
+        }
+        return this.walTracker.getAllLagInfo();
+    }
+
+    getWalTracker(): WalTracker {
+        return this.walTracker;
+    }
+
+    getSelectionStats() {
+        return this.selectionStats.getStats();
+    }
+
+    getConnectionTracker(): ReplicationConnectionTracker {
+        return this.connectionTracker;
+    }
+
+    getRouter(): ReplicationRouter {
+        return this.router;
+    }
+
     getStats(): Record<string, { total: number; idle: number; waiting: number }> {
         const stats: Record<string, { total: number; idle: number; waiting: number }> = {};
         for (const [endpointId, entry] of this.endpoints) {
@@ -819,6 +888,7 @@ export class ReplicationManager {
             return;
         }
         this.closed = true;
+        this.walTracker.stop();
 
         for (const entry of this.endpoints.values()) {
             if (!entry.owned || !entry.pool) {

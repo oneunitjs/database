@@ -10,6 +10,8 @@ const shardConfigs = [
             host: "127.0.0.1",
             port: 5440,
             user: "postgres",
+                password: "postgres",
+                password: "postgres",
             database: "shard0",
         },
     },
@@ -19,6 +21,8 @@ const shardConfigs = [
             host: "127.0.0.1",
             port: 5441,
             user: "postgres",
+                password: "postgres",
+                password: "postgres",
             database: "shard1",
         },
     },
@@ -28,6 +32,8 @@ const coordination = {
     host: "127.0.0.1",
     port: 5443,
     user: "postgres",
+                password: "postgres",
+                password: "postgres",
     database: "coordination",
 };
 

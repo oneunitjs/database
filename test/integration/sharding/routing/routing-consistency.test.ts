@@ -107,6 +107,8 @@ describe("Stage 3 — Routing and Topology Consistency (real PostgreSQL)", () =>
                 host: "127.0.0.1",
                 port,
                 user: "postgres",
+                password: "postgres",
+                password: "postgres",
                 database,
             },
         };

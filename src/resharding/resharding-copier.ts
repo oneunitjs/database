@@ -21,8 +21,17 @@ import type {
 import type { Logger } from "../types.js";
 import { ReshardingChangeCapture } from "./resharding-change-capture.js";
 import { ReshardingStore } from "./resharding-store.js";
+import { CopyMetricsTracker, type CopyMetrics } from "./resharding-metrics.js";
 
 const DEFAULT_BATCH_SIZE = 1000;
+
+function estimateBatchBytes(rows: ReadonlyArray<Record<string, unknown>>): number {
+    let bytes = 0;
+    for (const row of rows) {
+        bytes += Buffer.byteLength(JSON.stringify(row));
+    }
+    return bytes;
+}
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -70,6 +79,9 @@ export class ReshardingCopier {
     private readonly initializedShards = new Set<string>();
     private currentDescriptor: MigrationDescriptor | null = null;
     private snapshotIds: Map<string, string> | undefined;
+    private paused = false;
+    private pauseReason: string | null = null;
+    private readonly metrics: CopyMetricsTracker;
 
     constructor(
         coordination: Pool,
@@ -79,6 +91,7 @@ export class ReshardingCopier {
         logger?: Logger,
         hooks?: { onProgress?: (e: ProgressEvent) => void },
         initShard?: (shardId: string, pool: Pool) => Promise<void>,
+        metrics?: CopyMetricsTracker,
     ) {
         this.coordination = coordination;
         this.manager = manager;
@@ -88,6 +101,11 @@ export class ReshardingCopier {
         this.logger = logger;
         this.hooks = hooks;
         this.initShard = initShard;
+        this.metrics = metrics ?? new CopyMetricsTracker();
+    }
+
+    getCopyMetrics(): CopyMetrics {
+        return this.metrics.snapshot();
     }
 
     private async ensureShardInitialized(shardId: string, pool: Pool): Promise<void> {
@@ -118,6 +136,30 @@ export class ReshardingCopier {
             await this.initShard(shardId, pool);
         }
         this.initializedShards.add(shardId);
+    }
+
+    pause(reason = "operator"): void {
+        this.paused = true;
+        this.pauseReason = reason;
+    }
+
+    resume(): void {
+        this.paused = false;
+        this.pauseReason = null;
+    }
+
+    isPaused(): boolean {
+        return this.paused;
+    }
+
+    getPauseReason(): string | null {
+        return this.pauseReason;
+    }
+
+    private async waitIfPaused(): Promise<void> {
+        while (this.paused) {
+            await sleep(50);
+        }
     }
 
     /** Copy all units for a migration, bounded by concurrency. */
@@ -200,13 +242,16 @@ export class ReshardingCopier {
         let done = false;
 
         while (!done) {
-        const batch = await this.readBatchWithRetry(sourcePool, table, unit, cursor, snapshotId);
+            await this.waitIfPaused();
+            const batch = await this.readBatchWithRetry(sourcePool, table, unit, cursor, snapshotId);
             if (batch.rows.length === 0 || batch.done) {
                 done = true;
                 if (batch.rows.length === 0) break;
             }
 
-            // Write to destination idempotently within a transaction, with retries.
+            const batchBytes = estimateBatchBytes(batch.rows);
+            this.metrics.startBatch(batch.rows.length, batchBytes);
+
             let lastWriteError: Error | undefined;
             for (let attempt = 0; attempt <= this.options.maxRetries; attempt++) {
                 try {
@@ -220,10 +265,16 @@ export class ReshardingCopier {
                         return result;
                     });
                     lastWriteError = undefined;
+                    this.metrics.completeBatch(true);
+                    unit.rowsCopied += batch.rows.length;
                     break;
                 } catch (error) {
                     lastWriteError = error instanceof Error ? error : new Error(String(error));
-                    if (attempt === this.options.maxRetries) throw lastWriteError;
+                    if (attempt === this.options.maxRetries) {
+                        this.metrics.completeBatch(false, lastWriteError.name || "Error");
+                        throw lastWriteError;
+                    }
+                    this.metrics.recordRetry();
                     await sleep(this.backoff(attempt));
                 }
             }
@@ -232,7 +283,7 @@ export class ReshardingCopier {
             cursor = batch.nextCursor;
             await this.store.updateUnitCheckpoint(migrationId, unit.unitId, {
                 status: "copying",
-                rowsCopied: unit.rowsCopied + batch.rows.length,
+                rowsCopied: unit.rowsCopied,
                 lastCheckpoint: cursor,
             });
 
@@ -248,6 +299,7 @@ export class ReshardingCopier {
         }
 
         await this.store.updateUnitCheckpoint(migrationId, unit.unitId, { status: "caught_up" });
+        this.metrics.recordUnitCompleted();
     }
 
     private async readBatchWithRetry(

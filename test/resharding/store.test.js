@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ReshardingStore } from "../../../src/resharding/resharding-store.js";
+import { ReshardingStore } from "../../src/resharding/resharding-store.ts";
 
 import {
     InvalidStateTransitionError,
     MigrationLockedError,
     MigrationNotFoundError,
-} from "../../../src/resharding/resharding-errors.js";
+} from "../../src/resharding/resharding-errors.ts";
 
 function row(migrationId = "m-1", status = "planned", version = 1) {
     return {

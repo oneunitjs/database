@@ -51,3 +51,6 @@ yarn.lock
 tmp/
 .temp/
 /tmp/
+
+# Testcontainers runtime state
+.testcontainers.json

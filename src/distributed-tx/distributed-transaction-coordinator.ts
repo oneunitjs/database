@@ -8,7 +8,6 @@ import type {
 } from "../failover/failover-types.js";
 import { DatabaseError } from "../client/errors.js";
 import { DISTRIBUTED_TX_SCHEMA } from "./coordinator-schema.js";
-import { RetryPolicy } from "./retry-policy.js";
 import { DistributedTxHookRunner, defaultDistributedTxHookLogger } from "./distributed-tx-hooks.js";
 import type { DistributedTxHookContext } from "./distributed-tx-hooks.js";
 
@@ -34,6 +33,8 @@ export class DistributedTxTimeoutError extends DistributedTransactionError {
         this.transient = true;
     }
 }
+
+import { RetryPolicy } from "./retry-policy.js";
 
 export interface DistributedTxTimeoutConfig {
     prepareTimeoutMs: number;

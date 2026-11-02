@@ -91,6 +91,15 @@ describe("RetryPolicy", () => {
         expect(delays).toEqual([5, 10, 20]);
     });
 
+    it("exposes isRetryable for the configured classifier", () => {
+        const custom = new RetryPolicy({
+            isRetryable: (error) => error instanceof Error && error.message === "retry-me",
+        });
+        expect(custom.isRetryable(new Error("retry-me"))).toBe(true);
+        expect(custom.isRetryable(new Error("nope"))).toBe(false);
+        expect(new RetryPolicy().isRetryable(new DistributedTxTimeoutError("t", "tx"))).toBe(true);
+    });
+
     it("uses default options when none provided", async () => {
         const defaultPolicy = new RetryPolicy();
         const fn = vi.fn().mockRejectedValue(new Error("permission denied"));

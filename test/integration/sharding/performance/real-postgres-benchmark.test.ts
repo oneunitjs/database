@@ -78,7 +78,7 @@ describe("Stage 3 — Real PostgreSQL Performance Benchmarks", () => {
 
             // Create database instances
             nonShardedDb = createDatabase({
-                connectionString: `postgresql://postgres@127.0.0.1:5440/${BENCH_DB}`,
+                connectionString: `postgresql://postgres:postgres@127.0.0.1:5440/${BENCH_DB}`,
                 max: 10,
             });
 
@@ -94,6 +94,7 @@ describe("Stage 3 — Real PostgreSQL Performance Benchmarks", () => {
                                 host: "127.0.0.1",
                                 port: 5440,
                                 user: "postgres",
+                password: "postgres",
                                 database: BENCH_DB,
                             },
                         },
@@ -113,6 +114,7 @@ describe("Stage 3 — Real PostgreSQL Performance Benchmarks", () => {
                                 host: "127.0.0.1",
                                 port: 5440,
                                 user: "postgres",
+                password: "postgres",
                                 database: BENCH_DB,
                             },
                         },
@@ -122,6 +124,7 @@ describe("Stage 3 — Real PostgreSQL Performance Benchmarks", () => {
                                 host: "127.0.0.1",
                                 port: 5441,
                                 user: "postgres",
+                password: "postgres",
                                 database: BENCH_DB,
                             },
                         },
@@ -141,6 +144,7 @@ describe("Stage 3 — Real PostgreSQL Performance Benchmarks", () => {
                                 host: "127.0.0.1",
                                 port: 5440,
                                 user: "postgres",
+                password: "postgres",
                                 database: BENCH_DB,
                             },
                         },
@@ -150,6 +154,7 @@ describe("Stage 3 — Real PostgreSQL Performance Benchmarks", () => {
                                 host: "127.0.0.1",
                                 port: 5441,
                                 user: "postgres",
+                password: "postgres",
                                 database: BENCH_DB,
                             },
                         },
@@ -159,6 +164,7 @@ describe("Stage 3 — Real PostgreSQL Performance Benchmarks", () => {
                                 host: "127.0.0.1",
                                 port: 5442,
                                 user: "postgres",
+                password: "postgres",
                                 database: BENCH_DB,
                             },
                         },
@@ -248,9 +254,9 @@ describe("Stage 3 — Real PostgreSQL Performance Benchmarks", () => {
 
         // Seed data
         const seedUris = [
-            `postgresql://postgres@127.0.0.1:5440/${BENCH_DB}`,
-            `postgresql://postgres@127.0.0.1:5441/${BENCH_DB}`,
-            `postgresql://postgres@127.0.0.1:5442/${BENCH_DB}`,
+            `postgresql://postgres:postgres@127.0.0.1:5440/${BENCH_DB}`,
+            `postgresql://postgres:postgres@127.0.0.1:5441/${BENCH_DB}`,
+            `postgresql://postgres:postgres@127.0.0.1:5442/${BENCH_DB}`,
         ];
         for (const uri of seedUris) {
             const pool = new Pool({ connectionString: uri, max: 5 });

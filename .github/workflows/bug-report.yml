@@ -1,0 +1,76 @@
+name: Bug Report
+
+on:
+  issues:
+    types: [opened, edited, labeled]
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  triage:
+    name: Triage bug report
+    runs-on: ubuntu-latest
+    if: |
+      github.event.issue.pull_request == '' &&
+      contains(github.event.issue.labels.*.name, 'bug')
+    steps:
+      - name: Ensure bug label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = context.issue.labels.map(l => l.name);
+            if (!labels.includes('bug')) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: ['bug'],
+              });
+            }
+
+      - name: Add triage label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['needs-triage'],
+            });
+
+      - name: Post triage comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.repository }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+        run: |
+          BODY_FILE=$(mktemp)
+          cat > "$BODY_FILE" <<'EOF'
+          Hello @ISSUE_AUTHOR, thanks for reporting this bug!
+
+          We've labeled this as **bug** and placed it in **needs-triage**. A maintainer will review it shortly.
+
+          To help us investigate faster, please make sure:
+          1. You've completed the bug report checklist (minimal reproduction, error output, environment)
+          2. You've checked for duplicate open issues
+          3. You're on the latest version of @oneunit/database
+
+          A maintainer may ask for a minimal reproducible repository if one isn't provided.
+          EOF
+          BODY_FILE="${BODY_FILE//ISSUE_AUTHOR/$ISSUE_AUTHOR}"
+
+          ALREADY_POSTED=$(gh api \
+            repos/${REPO_OWNER}/${REPO_NAME}/issues/${ISSUE_NUMBER}/comments \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and .body | contains("thanks for reporting this bug")) | .id')
+
+          if [ -z "$ALREADY_POSTED" ]; then
+            gh api \
+              repos/${REPO_OWNER}/${REPO_NAME}/issues/${ISSUE_NUMBER}/comments \
+              -f body="$(cat "$BODY_FILE")"
+          fi
+          rm -f "$BODY_FILE"

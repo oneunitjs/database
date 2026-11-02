@@ -24,10 +24,23 @@ export interface ChangeCaptureOptions {
 export class ReshardingChangeCapture {
     private readonly coordination: Pool;
     private readonly getShardPool: (shardId: string) => Pool | undefined;
+    private paused = false;
 
     constructor(options: ChangeCaptureOptions) {
         this.coordination = options.coordination;
         this.getShardPool = options.getShardPool;
+    }
+
+    pause(): void {
+        this.paused = true;
+    }
+
+    resume(): void {
+        this.paused = false;
+    }
+
+    isPaused(): boolean {
+        return this.paused;
     }
 
     /**
@@ -172,6 +185,9 @@ export class ReshardingChangeCapture {
         afterTxid: number = 0,
         shardId?: string,
     ): Promise<{ applied: number }> {
+        if (this.paused) {
+            return { applied: 0 };
+        }
         let pool: Pool | undefined;
 
         if (shardId) {

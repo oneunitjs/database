@@ -94,6 +94,10 @@ export class RetryPolicy {
         return async () => this.execute(fn);
     }
 
+    isRetryable(error: unknown): boolean {
+        return this.options.isRetryable(error);
+    }
+
     getNextDelay(attempt: number): number {
         if (attempt >= this.options.maxRetries) {
             return -1;

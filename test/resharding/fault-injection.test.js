@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 
-import { createDatabase } from "../../src/index.js";
+import { createDatabase } from "../../src/index.ts";
 import { Pool } from "pg";
-import { WriteFencedError } from "../../src/resharding/resharding-errors.js";
+import { WriteFencedError } from "../../src/resharding/resharding-errors.ts";
 
 const PG_USER = process.env.PG_USER || "postgres";
 const PG_HOST = process.env.PG_HOST || "localhost";

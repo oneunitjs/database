@@ -6,6 +6,7 @@ import {
 } from "../../src/distributed-tx/index.js";
 import { RetryPolicy } from "../../src/distributed-tx/retry-policy.js";
 
+
 const mockQuery = vi.fn();
 
 vi.mock("pg", async (importOriginal) => {
@@ -132,7 +133,7 @@ describe("DistributedTransactionCoordinator timeouts", () => {
         const pool = new Pool();
         const coordinator = new DistributedTransactionCoordinator({
             coordinationPool: pool,
-            logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
+            logger: { debug: () => { }, info: () => { }, warn: () => { }, error: () => { } },
         });
         await coordinator.initialize();
 
@@ -147,7 +148,7 @@ describe("DistributedTransactionCoordinator timeouts", () => {
             coordinationPool: pool,
             timeouts: { prepareTimeoutMs: 10 },
             retryPolicy: new RetryPolicy({ maxRetries: 0 }),
-            logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
+            logger: { debug: () => { }, info: () => { }, warn: () => { }, error: () => { } },
         });
         await coordinator.initialize();
 
@@ -156,7 +157,7 @@ describe("DistributedTransactionCoordinator timeouts", () => {
         client.query = vi.fn().mockImplementation((text: unknown) => {
             const s = typeof text === "string" ? text : String(text);
             if (s.includes("PREPARE TRANSACTION")) {
-                return new Promise(() => {}); // hangs
+                return new Promise(() => { }); // hangs
             }
             return mockQuery(text);
         });

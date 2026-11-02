@@ -42,6 +42,7 @@ describe("Stage 3 — Resharding Correctness (real PostgreSQL)", () => {
                 host: "127.0.0.1",
                 port,
                 user: "postgres",
+                password: "postgres",
                 database: RESHARD_DB,
                 max: 1,
             });
@@ -127,6 +128,7 @@ describe("Stage 3 — Resharding Correctness (real PostgreSQL)", () => {
                 host: "127.0.0.1",
                 port,
                 user: "postgres",
+                password: "postgres",
                 database,
             },
         };
@@ -138,8 +140,8 @@ describe("Stage 3 — Resharding Correctness (real PostgreSQL)", () => {
             return;
         }
 
-        const sourceUri = `postgresql://postgres@127.0.0.1:5440/${RESHARD_DB}`;
-        const destUri = `postgresql://postgres@127.0.0.1:5441/${RESHARD_DB}`;
+        const sourceUri = `postgresql://postgres:postgres@127.0.0.1:5440/${RESHARD_DB}`;
+        const destUri = `postgresql://postgres:postgres@127.0.0.1:5441/${RESHARD_DB}`;
 
         // Seed source data
         const sourcePool = new Pool({ connectionString: sourceUri, max: 5 });
@@ -258,6 +260,7 @@ describe("Stage 3 — Resharding Correctness (real PostgreSQL)", () => {
                                 port: 5441,
                                 database: RESHARD_DB,
                                 user: "postgres",
+                password: "postgres",
                             },
                             addedAt: new Date().toISOString(),
                         },
@@ -391,7 +394,7 @@ describe("Stage 3 — Resharding Correctness (real PostgreSQL)", () => {
             return;
         }
 
-        const sourceUri = `postgresql://postgres@127.0.0.1:5440/${RESHARD_DB}`;
+        const sourceUri = `postgresql://postgres:postgres@127.0.0.1:5440/${RESHARD_DB}`;
 
         const db = createDatabase({
             sharding: {
@@ -442,6 +445,7 @@ describe("Stage 3 — Resharding Correctness (real PostgreSQL)", () => {
                                 port: 5441,
                                 database: RESHARD_DB,
                                 user: "postgres",
+                password: "postgres",
                             },
                             addedAt: new Date().toISOString(),
                         },
@@ -493,8 +497,8 @@ describe("Stage 3 — Resharding Correctness (real PostgreSQL)", () => {
             return;
         }
 
-        const sourceUri = `postgresql://postgres@127.0.0.1:5440/${RESHARD_DB}`;
-        const destUri = `postgresql://postgres@127.0.0.1:5441/${RESHARD_DB}`;
+        const sourceUri = `postgresql://postgres:postgres@127.0.0.1:5440/${RESHARD_DB}`;
+        const destUri = `postgresql://postgres:postgres@127.0.0.1:5441/${RESHARD_DB}`;
 
         const db = createDatabase({
             sharding: {
@@ -606,6 +610,7 @@ describe("Stage 3 — Resharding Correctness (real PostgreSQL)", () => {
                                 port: 5441,
                                 database: RESHARD_DB,
                                 user: "postgres",
+                password: "postgres",
                             },
                             addedAt: new Date().toISOString(),
                         },

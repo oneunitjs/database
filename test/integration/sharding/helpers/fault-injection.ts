@@ -50,10 +50,14 @@ export interface PgInstance {
 }
 
 export const PG_INSTANCES: PgInstance[] = [
-    { id: "shard-0", dataDir: "/tmp/kilo/sharding-integration/shard-0", port: 5440, host: "127.0.0.1", user: "postgres", database: "dtc_test" },
-    { id: "shard-1", dataDir: "/tmp/kilo/sharding-integration/shard-1", port: 5441, host: "127.0.0.1", user: "postgres", database: "dtc_test" },
-    { id: "shard-2", dataDir: "/tmp/kilo/sharding-integration/shard-2", port: 5442, host: "127.0.0.1", user: "postgres", database: "dtc_test" },
-    { id: "coordination-db", dataDir: "/tmp/kilo/sharding-integration/coordination-db", port: 5443, host: "127.0.0.1", user: "postgres", database: "coordination" },
+    { id: "shard-0", dataDir: "/tmp/kilo/sharding-integration/shard-0", port: 5440, host: "127.0.0.1", user: "postgres",
+                password: "postgres", database: "dtc_test" },
+    { id: "shard-1", dataDir: "/tmp/kilo/sharding-integration/shard-1", port: 5441, host: "127.0.0.1", user: "postgres",
+                password: "postgres", database: "dtc_test" },
+    { id: "shard-2", dataDir: "/tmp/kilo/sharding-integration/shard-2", port: 5442, host: "127.0.0.1", user: "postgres",
+                password: "postgres", database: "dtc_test" },
+    { id: "coordination-db", dataDir: "/tmp/kilo/sharding-integration/coordination-db", port: 5443, host: "127.0.0.1", user: "postgres",
+                password: "postgres", database: "coordination" },
 ];
 
 export function instanceById(id: string): PgInstance {

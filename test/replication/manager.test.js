@@ -57,6 +57,8 @@ function makeManager(options = {}) {
         mode: config.mode,
         lagThresholdMs: config.lagThresholdMs,
         healthCheck: config.healthCheck,
+        replicaSelectionPolicy: config.replicaSelectionPolicy,
+        walTracking: config.walTracking,
     });
 }
 
@@ -223,6 +225,44 @@ describe("ReplicationManager", () => {
         await expect(mgr.removeReplica("nope")).rejects.toThrow(
             ReplicationConfigError,
         );
+    });
+
+    it("addReplica preserves weight for later routing", async () => {
+        const mgr = makeManager({ replicaSelectionPolicy: "weighted" });
+        mgr.initialize();
+        await mgr.addReplica({
+            id: "replica-heavy",
+            connection: { connectionString: "postgresql://localhost:5432/replica-heavy" },
+            weight: 50,
+        });
+        const router = mgr.getRouter();
+        const heavy = router.replicaEndpoints.find((e) => e.endpointId === "replica-heavy");
+        expect(heavy?.weight).toBe(50);
+    });
+
+    it("round-robin policy on the manager spreads replica-preferred reads", async () => {
+        const mgr = makeManager({
+            replicaSelectionPolicy: "round-robin",
+            replicas: [
+                {
+                    id: "replica-0",
+                    connection: { connectionString: "postgresql://localhost:5432/replica-0" },
+                },
+                {
+                    id: "replica-1",
+                    connection: { connectionString: "postgresql://localhost:5432/replica-1" },
+                },
+            ],
+        });
+        mgr.initialize();
+        await mgr.endpointHealth("replica-0");
+        await mgr.endpointHealth("replica-1");
+        const first = mgr.readEndpoint("replica-preferred");
+        const second = mgr.readEndpoint("replica-preferred");
+        expect(first.endpointId).not.toBe(second.endpointId);
+        expect(new Set([first.endpointId, second.endpointId])).toEqual(new Set(["replica-0", "replica-1"]));
+        expect(mgr.getSelectionStats().totalSelections).toBeGreaterThanOrEqual(2);
+        await mgr.shutdown();
     });
 
     it("shutdown closes owned replica pools", async () => {

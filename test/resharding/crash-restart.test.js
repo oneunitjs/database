@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
-import { createDatabase } from "../../src/index.js";
+import { createDatabase } from "../../src/index.ts";
 import { Pool } from "pg";
 
 const PG_USER = process.env.PG_USER || "postgres";
