@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### 🚀 Features
+- Placeholder for upcoming changes
+
+---
+
+## [2.0.0-beta.1] - 2026-11-02
+
+### 🚀 Features
 
 #### Schema Auto-Sync
 - **SchemaSyncService:** Orchestrates schema synchronization across all shards (lock → prepare → check → apply → validate → complete/rollback)
