@@ -336,3 +336,9 @@ This document outlines the implementation plan to address all missing features r
 - [working-issues.md](./working-issues.md) - Feature tracking
 - [ARCHITECTURE.md](./ARCHITECTURE.md) - Technical architecture
 - [README.md](./README.md) - Usage documentation
+
+### Detailed Implementation Plans
+- [failover-plan.md](./failover-plan.md) - Failover Layer detailed implementation
+- [distributed-tx-plan.md](./distributed-tx-plan.md) - Distributed Transaction Layer detailed implementation
+- [replication-plan.md](./replication-plan.md) - Replication Layer detailed implementation
+- [resharding-plan.md](./resharding-plan.md) - Resharding Layer detailed implementation
