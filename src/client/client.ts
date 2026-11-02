@@ -146,14 +146,19 @@ export function createClient(
         // Track this client
         manualClients.add(client);
         
-        // Set leak detection timeout
+        // Set leak detection timeout — auto-reap to prevent unbounded connection retention
         const leakTimer = setTimeout(() => {
             if (manualClients.has(client)) {
                 (clientLogger as { warn?: (meta: object, msg: string) => void })?.warn?.({
-                    message: 'Manual client not released - potential connection leak',
+                    message: 'Manual client not released - auto-releasing connection',
                     stack: new Error().stack,
                     totalManualClients: manualClients.size,
                 }, 'Database connection leak detected');
+                try {
+                    client.release(new Error('Manual client leaked — auto-released'));
+                } catch {
+                    // Ignore errors during auto-release
+                }
             }
         }, CONNECTION_LEAK_TIMEOUT);
         

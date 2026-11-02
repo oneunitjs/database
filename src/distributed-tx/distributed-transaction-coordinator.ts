@@ -391,11 +391,13 @@ export class DistributedTransactionCoordinator {
             }
 
             try {
-                const preparedId = `pg_${transactionId}_${shardId}`;
+                // Sanitize preparedId to prevent SQL injection in PREPARE TRANSACTION
+                // (PREPARE TRANSACTION does not support parameterized identifiers)
+                const safePreparedId = `pg_${transactionId}_${shardId}`.replace(/'/g, "''");
 
                 await this.retryPolicy.execute(async () => {
                     await this.withTimeout(
-                        () => client.query(`PREPARE TRANSACTION '${preparedId}'`),
+                        () => client.query(`PREPARE TRANSACTION '${safePreparedId}'`),
                         this.timeouts.prepareTimeoutMs,
                         "prepare",
                         transactionId,
@@ -408,12 +410,12 @@ export class DistributedTransactionCoordinator {
                      VALUES ($1, $2, $3, 'prepared', NOW())
                      ON CONFLICT (transaction_id, shard_id)
                      DO UPDATE SET prepared_transaction_id = $3, participant_status = 'prepared', prepared_at = NOW()`,
-                    [transactionId, shardId, preparedId],
+                    [transactionId, shardId, safePreparedId],
                 );
 
-                ctx.preparedTransactionId = preparedId;
+                ctx.preparedTransactionId = safePreparedId;
                 this.logger.debug(
-                    { transactionId, shardId, preparedTransactionId: preparedId },
+                    { transactionId, shardId, preparedTransactionId: safePreparedId },
                     "Participant prepared",
                 );
             } catch (error) {

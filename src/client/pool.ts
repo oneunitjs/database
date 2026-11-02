@@ -33,15 +33,20 @@ function wrapClient(client: PoolClient, pool: Pool, logger?: Logger, validateCon
     // Track connection for leak detection
     activeConnections.add(client);
     
-    // Set timeout for leak detection
+    // Set timeout for leak detection — auto-reap to prevent unbounded connection retention
     const leakTimeout = setTimeout(() => {
         if (activeConnections.has(client)) {
             logger?.warn?.({
-                message: 'Connection leak detected',
+                message: 'Connection leak detected — auto-releasing connection',
                 stack: new Error().stack,
                 totalConnections: pool.totalCount,
                 idleConnections: pool.idleCount,
             }, 'Database connection not released within 5 minutes - potential leak');
+            try {
+                client.release(new Error('Connection leaked — auto-released'));
+            } catch {
+                // Ignore errors during auto-release
+            }
         }
     }, CONNECTION_VALIDATION_TIMEOUT);
     
