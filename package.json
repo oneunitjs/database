@@ -121,7 +121,7 @@
     "pg-query-stream": "^4.16.0",
     "testcontainers": "^12.2.1",
     "tsx": "^4.20.5",
-    "typescript": "^5.9.2",
+    "typescript": "^7.0.2",
     "vitest": "^3.2.7"
   },
   "peerDependencies": {
