@@ -49,6 +49,7 @@ Built on [`pg`](https://node-postgres.com), with optional [`pg-cursor`](https://
 - [Replication](#replication)
 - [Online Resharding (Data Migration)](#online-resharding-data-migration)
 - [Distributed Transactions](#distributed-transactions)
+- [Failover](#failover)
 - [Error Handling](#error-handling)
 - [Logging & Metrics](#logging--metrics)
 - [TypeScript](#typescript)
@@ -418,6 +419,15 @@ await rsharding.finalize();
 ## Recent Improvements
 
 The package has undergone significant stability and reliability improvements:
+
+### 🚀 New Features
+
+- **🎯 Shard Rebalance Tracker** — Track shard rebalancing progress with automatic percentage calculation and state management
+- **🔐 SQL Injection Fix** — `enumColumn()` now properly escapes single quotes in enum values
+- **📡 Replication Support** — Complete primary/replica routing with lag-aware read preference
+- **⚡ Failover Support** — High-availability with Static and Patroni providers
+- **🔗 Distributed Transactions** — Two-phase commit across multiple shards
+- **📝 Custom Shard Strategies** — Register custom strategies with `registerShardStrategy()`
 
 ### 🛡️ Production Readiness
 
@@ -1355,6 +1365,84 @@ const proposal = db.sharding.topology.planRebalance({ strategy: "least-loaded" }
 console.log(proposal.proposal);      // [{ fromShardId, toShardId, reason, estimatedRows? }]
 ```
 
+### Shard Rebalancing
+
+Track progress of shard rebalance operations with the built-in `ShardRebalanceTracker`. This in-memory tracker helps monitor and manage data migration between shards.
+
+**Basic Usage**:
+
+```javascript
+const db = createDatabase({ /* sharding config */ });
+
+// Access the rebalance tracker
+const tracker = db.sharding.rebalanceTracker;
+
+// Create a new rebalance operation
+const progress = tracker.createRebalance(
+  "shard-0",  // source shard
+  "shard-1",  // destination shard
+  10000       // total keys to migrate
+);
+
+console.log(progress.rebalanceId);      // "rebal-abc123..."
+console.log(progress.status);          // "planning"
+console.log(progress.percentage);      // 0
+
+// Update progress as keys are migrated
+const updated = tracker.updateProgress(progress.rebalanceId, {
+  movedKeys: 2500,
+  failedKeys: 50,
+});
+
+console.log(updated.percentage);       // 25.5
+console.log(updated.status);           // "copying" (auto-transitioned)
+
+// Mark as completed (or let it auto-complete when all keys are processed)
+tracker.completeRebalance(progress.rebalanceId);
+
+// Or mark as failed
+if (errorOccurred) {
+  tracker.failRebalance(progress.rebalanceId, error.message);
+}
+
+// Or cancel
+if (userCancelled) {
+  tracker.cancelRebalance(progress.rebalanceId);
+}
+
+// Query rebalance operations
+const allRebalances = tracker.listRebalances();
+const specificRebalance = tracker.getRebalance(progress.rebalanceId);
+
+// Clean up completed operations
+tracker.clearCompleted();
+```
+
+**ShardRebalanceProgress Properties**:
+
+| Property | Type | Description |
+| :--- | :--- | :--- |
+| `rebalanceId` | `string` | Unique identifier for the rebalance operation |
+| `sourceShardId` | `string` | Source shard identifier |
+| `destinationShardId` | `string` | Destination shard identifier |
+| `totalKeys` | `number` | Total number of keys to migrate |
+| `movedKeys` | `number` | Number of keys successfully migrated |
+| `failedKeys` | `number` | Number of keys that failed to migrate |
+| `skippedKeys` | `number` | Number of keys skipped |
+| `percentage` | `number` | Completion percentage (0-100) |
+| `status` | `string` | Current status: `"planning"`, `"copying"`, `"validating"`, `"cutting-over"`, `"completed"`, `"failed"`, `"cancelled"` |
+| `startedAt` | `string` | ISO timestamp when rebalance started |
+| `updatedAt` | `string` | ISO timestamp of last update |
+| `errors` | `string[]` | Array of error messages |
+
+**Automatic State Transitions**:
+
+- When `movedKeys + failedKeys + skippedKeys >= totalKeys`, status automatically transitions to `"completed"`
+- Percentage is automatically recalculated when `movedKeys` or `totalKeys` changes
+- Terminal states (`completed`, `failed`, `cancelled`) cannot be changed
+
+**Note**: This is an in-memory tracker. For production use with process restarts, persist the state to a database or external store.
+
 ---
 
 ## Replication
@@ -1398,14 +1486,32 @@ const db = createDatabase({
 
 When sharding is enabled, use `ShardConfig.replication` instead (each shard's `connection` is its primary).
 
+### Read Preference Modes
+
+| Mode | Behavior | Use Case |
+| :--- | :--- | :--- |
+| `"primary"` | Always read from primary | Strong consistency required, write-after-read patterns |
+| `"replica-preferred"` | Prefer replicas, fall back to primary if none eligible | Read scaling, slightly stale data acceptable |
+| `"replica-only"` | Read from replicas only, error if none eligible | Analytics, reporting, read-only workloads |
+
 | Property | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
 | `enabled` | `boolean` | Yes | Whether replication is active |
-| `mode` | `"primary" \| "replica-preferred" \| "replica-only"` | Yes | Read preference / routing mode |
-| `primary` | `ReplicationEndpointConfig` | No | Primary endpoint (defaults to the main connection with id `"primary"`) |
+| `mode` | `"primary" \| "replica-preferred" \| "replica-only"` | Yes | Default read preference for queries |
+| `primary` | `ReplicationEndpointConfig` | No | Primary endpoint config (defaults to main connection with id `"primary"`) |
 | `replicas` | `ReplicationEndpointConfig[]` | Yes | List of read replica endpoint configurations |
-| `lagThresholdMs` | `number` | No | Exclude replicas whose known lag (ms) exceeds this |
+| `lagThresholdMs` | `number` | No | Exclude replicas whose lag exceeds this threshold (default: 1000ms) |
 | `healthCheck` | `object` | No | `{ enabled, intervalMs, timeoutMs, lagQuery? }` |
+
+**ReplicationEndpointConfig**:
+```typescript
+{
+  id: string;                    // Unique endpoint identifier
+  connection: PoolConfig;        // PostgreSQL connection config
+  role?: "primary" | "replica"; // Explicit role (auto-detected if omitted)
+  weight?: number;               // Weight for load balancing (default: 1)
+}
+```
 
 ### Routing Intent
 
@@ -1529,17 +1635,294 @@ The application supplies a `MigrationDescriptor` describing each table's primary
 
 ---
 
-## Distributed Transactions
+## Failover
 
-Cross-shard two-phase commit (2PC) for atomic operations across multiple shards. Requires `max_prepared_transactions > 0` on all participating PostgreSQL servers.
+High-availability support for PostgreSQL clusters with primary/replica failover. Supports both static configurations and Patroni-managed clusters.
+
+### Configuration
+
+**Static HA Provider** (simple deployments):
 
 ```javascript
+import { createDatabase, StaticHaProvider } from "@oneunit/database";
+
+const db = createDatabase({
+  failover: {
+    provider: "static",
+    staticConfig: {
+      primary: {
+        id: "primary",
+        host: "primary-host",
+        port: 5432,
+        database: "mydb",
+        user: "postgres",
+        password: "secret",
+      },
+      replicas: [
+        {
+          id: "replica-1",
+          host: "replica-1-host",
+          port: 5432,
+          database: "mydb",
+          user: "postgres",
+          password: "secret",
+        },
+      ],
+    },
+    healthCheckIntervalMs: 10000,
+    failoverTimeoutMs: 30000,
+  },
+});
+```
+
+**Patroni HA Provider** (production Patroni clusters):
+
+```javascript
+import { createDatabase, PatroniHaProvider } from "@oneunit/database";
+
+const db = createDatabase({
+  failover: {
+    provider: "patroni",
+    patroniConfig: {
+      restApiUrl: "http://patroni-cluster:8008",
+      // Optional: DCS endpoint (etcd, ZooKeeper, etc.)
+      dcsEndpoint: "http://etcd:2379",
+    },
+    healthCheckIntervalMs: 10000,
+    failoverTimeoutMs: 30000,
+  },
+});
+```
+
+### Failover API
+
+```javascript
+// Get current topology
+const topology = await db.failover.getTopology();
+console.log("Primary:", topology.primaryNode);
+console.log("Replicas:", topology.replicaNodes);
+
+// Check health
+const health = await db.failover.healthCheck();
+console.log("Status:", health.status); // "active", "degraded", "failover", etc.
+
+// Get current state
+const state = await db.failover.getState();
+console.log("State:", state); // "active", "degraded", "failover", "split-brain", "no-primary", "unknown"
+```
+
+### Failover States
+
+| State | Description | Action Required |
+| :--- | :--- | :--- |
+| `active` | Primary available, replicas healthy | Normal operation |
+| `degraded` | Primary available, some replicas unhealthy | Monitor replicas |
+| `failover` | Failover in progress | Wait for completion |
+| `split-brain` | Multiple primaries detected | **CRITICAL** - Manual intervention |
+| `no-primary` | No primary available | Promote replica or restore primary |
+| `unknown` | Initial state, health not yet checked | Wait for health check |
+
+### Failover Events
+
+Subscribe to state change events:
+
+```javascript
+db.failover.on("state-change", (event) => {
+  console.log(`State changed: ${event.fromState} -> ${event.toState}`);
+  console.log("Reason:", event.error || "manual");
+});
+
+db.failover.on("topology-change", (topology) => {
+  console.log("New primary:", topology.primaryNode?.id);
+});
+```
+
+### Manual Failover
+
+```javascript
+// Trigger failover (with StaticHaProvider)
+await db.failover.triggerFailover();
+
+// Or promote a specific replica
+await db.failover.promoteReplica("replica-1");
+```
+
+### Error Handling
+
+```javascript
+import {
+  FailoverError,
+  FailoverNotSupportedError,
+  SplitBrainPreventedError,
+  PrimaryNotVerifiedError,
+} from "@oneunit/database";
+
+try {
+  await db.failover.promoteReplica("replica-1");
+} catch (error) {
+  if (error instanceof SplitBrainPreventedError) {
+    console.error("SPLIT BRAIN DETECTED! Manual intervention required!");
+  } else if (error instanceof FailoverNotSupportedError) {
+    console.error("Failover not supported with current provider");
+  }
+}
+```
+
+### Production Best Practices
+
+1. **Monitor `split-brain` state** — Alert immediately and investigate
+2. **Test failover procedures** — Regularly test in staging
+3. **Configure appropriate timeouts** — Match your SLA requirements
+4. **Use Patroni for production** — Better primary detection and automatic failover
+5. **Monitor health checks** — Ensure all nodes are being checked regularly
+
+---
+
+## Distributed Transactions
+
+Cross-shard two-phase commit (2PC) for atomic operations across multiple shards. Requires `max_prepared_transactions > 0` on all participating PostgreSQL servers. This is exposed both through the sharding layer (`db.sharding.distributedTransaction`) and directly (`db.distributedTx`).
+
+**Quick Start**:
+
+```javascript
+// Using the sharding API
 const result = await db.sharding.distributedTransaction(async (tx) => {
     await tx.execute("user-1", "INSERT INTO orders (user_id, total) VALUES ($1, $2)", [userId, 99.99]);
     await tx.execute("user-2", "UPDATE accounts SET balance = balance - $1 WHERE user_id = $2", [50, userId]);
 }, { isolation: "SERIALIZABLE", timeout: 10_000 });
 
 // result: { transactionId, status: "committed", participants: { "shard-0": "committed", "shard-1": "committed" } }
+```
+
+**Using the direct API**:
+
+```javascript
+import { DistributedTransactionCoordinator } from "@oneunit/database";
+
+// Create coordinator with participant shards
+const coordinator = new DistributedTransactionCoordinator({
+  prepareTimeoutMs: 30000,
+  commitTimeoutMs: 30000,
+});
+
+// Begin a distributed transaction
+const { transactionId, context } = await coordinator.begin();
+
+try {
+  // Execute on shard A
+  await context.execute(
+    { shardId: "shard-a" },
+    "INSERT INTO orders (user_id, total) VALUES ($1, $2)",
+    [userId, 99.99]
+  );
+
+  // Execute on shard B
+  await context.execute(
+    { shardId: "shard-b" },
+    "UPDATE accounts SET balance = balance - $1 WHERE user_id = $2",
+    [50, userId]
+  );
+
+  // Prepare and commit
+  await coordinator.prepare(transactionId);
+  await coordinator.commit(transactionId);
+  
+  console.log("Transaction committed successfully");
+} catch (error) {
+  await coordinator.abort(transactionId);
+  throw error;
+}
+```
+
+### Two-Phase Commit Lifecycle
+
+1. **Begin** → Creates transaction ID and registers participants
+2. **Execute** → Runs SQL on participants, tracks statements
+3. **Prepare** → `PREPARE TRANSACTION` on all participants
+4. **Commit** → `COMMIT PREPARED` on all participants (atomic)
+5. **Abort** → `ROLLBACK PREPARED` on all participants (on any failure)
+
+### Configuration
+
+```javascript
+const coordinator = new DistributedTransactionCoordinator({
+  prepareTimeoutMs: 30000,    // Timeout for PREPARE (default: 30s)
+  commitTimeoutMs: 30000,     // Timeout for COMMIT (default: 30s)
+  maxRetries: 3,              // Max retries for prepare/commit
+});
+```
+
+### Execute Options
+
+```typescript
+interface DistributedTransactionExecuteOptions {
+  timeoutMs?: number;         // Statement timeout
+  retryOnDeadlock?: boolean;  // Retry on deadlock (default: true)
+}
+
+await context.execute(
+  { shardId: "shard-1" },
+  "UPDATE users SET balance = balance - $1 WHERE id = $2",
+  [100, userId],
+  { timeoutMs: 5000, retryOnDeadlock: true }
+);
+```
+
+### Status and Recovery
+
+```javascript
+// Check transaction status
+const status = await coordinator.getStatus(transactionId);
+// { state: "prepared", participants: { "shard-a": "prepared", "shard-b": "prepared" } }
+
+// Recover from crash - prepare was successful but commit failed
+if (status.state === "prepared") {
+  await coordinator.commit(transactionId);
+}
+```
+
+**States**:
+- `pending` — Transaction created, not yet prepared
+- `prepared` — All participants prepared, waiting for commit
+- `committed` — Successfully committed
+- `aborted` — Successfully aborted
+- `failed` — Failed during prepare or commit
+
+### Error Handling
+
+All distributed transaction errors extend `DistributedTransactionError`:
+
+```javascript
+import {
+  DistributedTransactionError,
+  DistributedTxNotFoundError,
+  DistributedTxAlreadyResolvedError,
+  MaxPreparedTransactionsError,
+} from "@oneunit/database";
+
+try {
+  await coordinator.commit(transactionId);
+} catch (error) {
+  if (error instanceof DistributedTxAlreadyResolvedError) {
+    console.log("Transaction already resolved");
+  } else if (error instanceof MaxPreparedTransactionsError) {
+    console.log("Increase PostgreSQL max_prepared_transactions");
+  } else if (error instanceof DistributedTransactionError) {
+    console.log("Distributed transaction failed:", error.message);
+  }
+}
+```
+
+### PostgreSQL Configuration
+
+Ensure all participating PostgreSQL servers have:
+
+```sql
+-- In postgresql.conf
+max_prepared_transactions = 100  -- Or higher based on expected concurrency
+
+-- Check current value
+SHOW max_prepared_transactions;
 ```
 
 All operations are prepared atomically and committed or aborted together. On any failure, `coordinator.abort()` is invoked to roll back all participants.

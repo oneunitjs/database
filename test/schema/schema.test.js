@@ -17,8 +17,8 @@ describe("schema manager", () => {
             name: "TEXT NOT NULL",
         });
 
-        expect(queries[0]).toMatch(/CREATE TABLE IF NOT EXISTS users/);
-        expect(queries[0]).toMatch(/id UUID PRIMARY KEY/);
-        expect(queries[0]).toMatch(/name TEXT NOT NULL/);
+        expect(queries[0]).toMatch(/CREATE TABLE IF NOT EXISTS.*users/);
+        expect(queries[0]).toMatch(/"id" UUID PRIMARY KEY/);
+        expect(queries[0]).toMatch(/"name" TEXT NOT NULL/);
     });
 });

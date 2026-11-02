@@ -90,4 +90,18 @@ describe("retry", () => {
         expect(attempts).toBe(2);
         expect(retry.isTransient({ code: "40001" })).toBe(true);
     });
+
+    it("withRetry retries ECONNRESET stale-connection errors", async () => {
+        let attempts = 0;
+        const result = await withRetry(async () => {
+            attempts += 1;
+            if (attempts < 2) {
+                throw Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+            }
+            return "ok";
+        }, { retries: 3, baseDelay: 1, jitter: 0 });
+
+        expect(result).toBe("ok");
+        expect(attempts).toBe(2);
+    });
 });

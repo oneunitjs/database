@@ -1,9 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 
 import {
     createDatabase,
     createShardStrategy,
     getRegisteredStrategyNames,
+    registerShardStrategy,
     HashShardStrategy,
     DirectoryShardStrategy,
     ConsistentHashShardStrategy,
@@ -64,6 +65,75 @@ describe("strategy registry", () => {
         expect(() => createShardStrategy("unknown-strategy")).toThrow();
         expect(() => createShardStrategy("consistent_hash")).toThrow();
         expect(() => createShardStrategy("")).toThrow();
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Pluggable custom strategy registration
+// ---------------------------------------------------------------------------
+
+describe("pluggable custom strategies", () => {
+    class CustomModStrategy {
+        constructor() {
+            this.name = "custom-mod";
+            this.version = 1;
+        }
+        validate(_config, ids) {
+            if (!ids || ids.length === 0) {
+                throw new Error("CustomMod requires shards");
+            }
+        }
+        resolveShard(shardKey, context) {
+            const hash = shardKey.length % context.shardIds.length;
+            return context.shardIds[hash];
+        }
+    }
+
+    afterEach(() => {
+        // Clean up any custom registrations between tests by re-creating a
+        // fresh registry state is not possible, so we just verify behavior
+    });
+
+    it("registerShardStrategy registers a custom strategy", () => {
+        const namesBefore = getRegisteredStrategyNames();
+        expect(namesBefore).not.toContain("custom-mod");
+
+        registerShardStrategy({
+            name: "custom-mod",
+            strategy: new CustomModStrategy(),
+        });
+
+        const namesAfter = getRegisteredStrategyNames();
+        expect(namesAfter).toContain("custom-mod");
+
+        const strategy = createShardStrategy("custom-mod");
+        expect(strategy).toBeInstanceOf(CustomModStrategy);
+        expect(strategy.name).toBe("custom-mod");
+    });
+
+    it("registerShardStrategy throws on duplicate name", () => {
+        registerShardStrategy({
+            name: "custom-dup",
+            strategy: new CustomModStrategy(),
+        });
+
+        expect(() =>
+            registerShardStrategy({
+                name: "custom-dup",
+                strategy: new CustomModStrategy(),
+            }),
+        ).toThrow(/already registered/);
+    });
+
+    it("createShardStrategy creates registered custom strategy", () => {
+        const strategy = createShardStrategy("custom-mod");
+        const ctx = {
+            shardKey: "abcd",
+            shardIds: ["shard-0", "shard-1", "shard-2"],
+        };
+        const result = strategy.resolveShard("abcd", ctx);
+        // "abcd".length = 4, 4 % 3 = 1, so shard-1
+        expect(result).toBe("shard-1");
     });
 });
 

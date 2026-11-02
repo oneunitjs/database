@@ -3,19 +3,22 @@ import type {
     ShardRoutingContext,
     ShardStrategy,
     ShardStrategyName,
+    ShardRoutingDiagnostic,
+    ShardRoutingDiagnostics,
 } from "../types.js";
 import {
     ShardConfigError,
     ShardNotFoundError,
     ShardingDisabledError,
 } from "./errors.js";
-import { createShardStrategy } from "./strategies.js";
+import { createShardStrategy, registerShardStrategy } from "./strategies.js";
 import { ShardManager } from "./shard-manager.js";
 
 export interface ShardRouterOptions {
     manager: ShardManager;
     enabled: boolean;
     strategy?: ShardStrategyName;
+    strategyInstance?: ShardStrategy;
     defaultShardId?: string;
     directory?: Record<string, string>;
     virtualNodes?: number;
@@ -53,6 +56,13 @@ export class ShardRouter {
     private readonly unknownKeyPolicy: "throw" | "default" | undefined;
     private readonly unknownRegionPolicy: "throw" | "default" | undefined;
 
+    // Routing diagnostics
+    private readonly diagnostics: ShardRoutingDiagnostic[] = [];
+    private readonly maxDiagnostics = 1000;
+    private totalRoutes = 0;
+    private byStrategy: Record<string, number> = {};
+    private byShard: Record<string, number> = {};
+
     constructor(options: ShardRouterOptions) {
         this.manager = options.manager;
         this.enabled = options.enabled;
@@ -69,8 +79,12 @@ export class ShardRouter {
         this.unknownKeyPolicy = options.unknownKeyPolicy;
         this.unknownRegionPolicy = options.unknownRegionPolicy;
 
-        if (options.enabled && options.strategy) {
-            this.strategy = createShardStrategy(options.strategy);
+        if (options.enabled) {
+            if (options.strategyInstance) {
+                this.strategy = options.strategyInstance;
+            } else if (options.strategy) {
+                this.strategy = createShardStrategy(options.strategy);
+            }
         }
     }
 
@@ -84,6 +98,60 @@ export class ShardRouter {
     get strategyName(): ShardStrategyName | undefined {
         return this.strategy?.name;
     }
+
+    get strategyVersion(): number | undefined {
+        return this.strategy?.version;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Routing diagnostics
+    // ---------------------------------------------------------------------------
+
+    private recordDiagnostic(
+        shardKey: string,
+        selectedShardId: string,
+        routingPath: string[],
+        metadata: Record<string, unknown>,
+    ): void {
+        const diagnostic: ShardRoutingDiagnostic = {
+            shardKey,
+            selectedShardId,
+            strategy: this.strategy?.name as ShardStrategyName,
+            strategyVersion: this.strategy?.version ?? 0,
+            routingPath,
+            metadata,
+            timestamp: new Date().toISOString(),
+        };
+
+        this.diagnostics.push(diagnostic);
+        if (this.diagnostics.length > this.maxDiagnostics) {
+            this.diagnostics.shift();
+        }
+
+        this.totalRoutes++;
+        const s = this.strategy?.name ?? "unknown";
+        this.byStrategy[s] = (this.byStrategy[s] ?? 0) + 1;
+        this.byShard[selectedShardId] = (this.byShard[selectedShardId] ?? 0) + 1;
+    }
+
+    getDiagnostics(): ShardRoutingDiagnostics {
+        return {
+            recent: [...this.diagnostics],
+            totalRoutes: this.totalRoutes,
+            byStrategy: { ...this.byStrategy } as Record<ShardStrategyName, number>,
+            byShard: { ...this.byShard },
+            clear: () => {
+                this.diagnostics.length = 0;
+                this.totalRoutes = 0;
+                this.byStrategy = {};
+                this.byShard = {};
+            },
+        };
+    }
+
+    // ---------------------------------------------------------------------------
+    // Routing
+    // ---------------------------------------------------------------------------
 
     private buildContext(shardKey: string): ShardRoutingContext {
         return {
@@ -116,12 +184,22 @@ export class ShardRouter {
         }
 
         const context = this.buildContext(shardKey);
+        const routingPath: string[] = [`strategy:${this.strategy.name}`];
 
         const shardId = this.strategy.resolveShard(shardKey, context);
+        routingPath.push(`resolved:${shardId}`);
 
         if (!this.manager.hasShard(shardId)) {
             throw new ShardNotFoundError(shardId);
         }
+
+        this.recordDiagnostic(shardKey, shardId, routingPath, {
+            strategyName: this.strategy.name,
+            strategyVersion: this.strategy.version,
+            shardKeyHash: String(
+                (context as { _hash?: number })._hash ?? 0,
+            ),
+        });
 
         return shardId;
     }

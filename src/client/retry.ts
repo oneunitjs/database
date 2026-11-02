@@ -35,10 +35,7 @@ function isRetryableError(error: any): boolean {
         return false;
     }
     
-    // Don't retry on connection reset errors (usually indicates stale connection)
-    if (error.code === 'ECONNRESET') {
-        return false;
-    }
+    // Retry connection resets — they usually indicate a stale pooled connection.
     
     // Don't retry on connection timeout during pool acquisition
     if (error.code === 'ETIMEDOUT' && error.message?.includes?.('pool')) {

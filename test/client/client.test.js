@@ -7,6 +7,8 @@ function makeClient(queryImpl) {
         calls: [],
         released: false,
         releaseError: undefined,
+        cancelled: false,
+        activeQuery: null,
         async query(config, values) {
             client.calls.push({ config, values });
             if (queryImpl) {
@@ -17,6 +19,12 @@ function makeClient(queryImpl) {
         release(error) {
             client.released = true;
             client.releaseError = error;
+        },
+        cancel(c, q) {
+            client.cancelled = true;
+        },
+        _getActiveQuery() {
+            return client.activeQuery;
         },
     };
     return client;
@@ -176,5 +184,66 @@ describe("client extended", () => {
 
         expect(result.rows).toEqual([{ id: 1 }]);
         expect(released).toBe(true);
+    });
+
+    it("getClient releases a late-arriving connection after acquire timeout", async () => {
+        let released = false;
+        let resolveConnect;
+        const pool = {
+            connect() {
+                return new Promise((resolve) => {
+                    resolveConnect = () => resolve({
+                        release() {
+                            released = true;
+                        },
+                    });
+                });
+            },
+        };
+
+        const db = createClient(pool, undefined, { connectTimeout: 20 });
+        await expect(db.getClient({ timeout: 20 })).rejects.toBeInstanceOf(TimeoutError);
+        resolveConnect();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(released).toBe(true);
+    });
+
+    it("cancel() is exposed on the client API", () => {
+        const client = makeClient();
+        const db = createClient(makePool(() => client));
+        expect(typeof db.cancel).toBe("function");
+    });
+
+    it("cancel() calls pg cancel on the client", () => {
+        const client = makeClient();
+        const db = createClient(makePool(() => client));
+        client.activeQuery = { text: "SELECT pg_sleep(100)" };
+        db.cancel(client);
+        expect(client.cancelled).toBe(true);
+    });
+
+    it("cancel() is a no-op when no query is active", () => {
+        const client = makeClient();
+        const db = createClient(makePool(() => client));
+        expect(() => db.cancel(client)).not.toThrow();
+        expect(client.cancelled).toBe(false);
+    });
+
+    it("query timeout cancels the query on the server by default", async () => {
+        const client = makeClient(() => new Promise(() => {}));
+        client.activeQuery = { text: "SELECT pg_sleep(100)" };
+        const db = createClient(makePool(() => client), undefined, { timeout: 20 });
+
+        await expect(db.query("SELECT pg_sleep(100)")).rejects.toThrow(TimeoutError);
+        expect(client.cancelled).toBe(true);
+    });
+
+    it("query timeout does not cancel when cancel: false", async () => {
+        const client = makeClient(() => new Promise(() => {}));
+        client.activeQuery = { text: "SELECT pg_sleep(100)" };
+        const db = createClient(makePool(() => client), undefined, { timeout: 20 });
+
+        await expect(db.query("SELECT pg_sleep(100)", [], { cancel: false })).rejects.toThrow(TimeoutError);
+        expect(client.cancelled).toBe(false);
     });
 });

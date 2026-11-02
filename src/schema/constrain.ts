@@ -1,8 +1,9 @@
 import type { Pool } from "pg";
 import type { SchemaConstrain } from "../types.js";
+import { quoteIdent } from "../query/sql.js";
 
 function normalizeColumns(columns: string | string[]): string {
-    return Array.isArray(columns) ? columns.join(", ") : columns;
+    return Array.isArray(columns) ? columns.map(c => quoteIdent(c)).join(", ") : quoteIdent(columns);
 }
 
 function validateAction(type: string, action: string | undefined): void {
@@ -24,8 +25,8 @@ export function constrainSchema(pool: Pool): SchemaConstrain {
         const list = normalizeColumns(columns);
 
         const sql = `
-            ALTER TABLE ${tableName}
-            ADD CONSTRAINT ${constraint}
+            ALTER TABLE ${quoteIdent(tableName)}
+            ADD CONSTRAINT ${quoteIdent(constraint)}
             UNIQUE (${list});
         `;
 
@@ -49,10 +50,10 @@ export function constrainSchema(pool: Pool): SchemaConstrain {
         const referencedColumns = normalizeColumns(referenceColumns);
 
         const sql = `
-            ALTER TABLE ${tableName}
-            ADD CONSTRAINT ${constraint}
+            ALTER TABLE ${quoteIdent(tableName)}
+            ADD CONSTRAINT ${quoteIdent(constraint)}
             FOREIGN KEY (${localColumns})
-            REFERENCES ${referenceTable} (${referencedColumns})
+            REFERENCES ${quoteIdent(referenceTable)} (${referencedColumns})
             ${onDelete ? `ON DELETE ${onDelete}` : ""}
             ${onUpdate ? `ON UPDATE ${onUpdate}` : ""};
         `;
@@ -62,8 +63,8 @@ export function constrainSchema(pool: Pool): SchemaConstrain {
 
     async function check(tableName: string, constraint: string, expression: string): Promise<void> {
         const sql = `
-            ALTER TABLE ${tableName}
-            ADD CONSTRAINT ${constraint}
+            ALTER TABLE ${quoteIdent(tableName)}
+            ADD CONSTRAINT ${quoteIdent(constraint)}
             CHECK (${expression});
         `;
 
@@ -72,8 +73,8 @@ export function constrainSchema(pool: Pool): SchemaConstrain {
 
     async function dropConstraint(tableName: string, constraint: string): Promise<void> {
         const sql = `
-            ALTER TABLE ${tableName}
-            DROP CONSTRAINT IF EXISTS ${constraint};
+            ALTER TABLE ${quoteIdent(tableName)}
+            DROP CONSTRAINT IF EXISTS ${quoteIdent(constraint)};
         `;
 
         await pool.query(sql);

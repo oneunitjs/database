@@ -4,6 +4,7 @@ import type {
     ShardStrategyName,
     WeightedShardConfig,
     ShardRange,
+    CustomShardStrategyRegistration,
 } from "../types.js";
 import { ShardConfigError, ShardNotFoundError } from "./errors.js";
 
@@ -584,4 +585,23 @@ export function createShardStrategy(name: ShardStrategyName): ShardStrategy {
 
 export function getRegisteredStrategyNames(): ShardStrategyName[] {
     return Array.from(STRATEGY_REGISTRY.keys());
+}
+
+/**
+ * Register a custom shard selection strategy so it can be used by name in
+ * ShardRouter configuration. Custom strategies coexist with the built-in ones
+ * and can be looked up via createShardStrategy() and getRegisteredStrategyNames().
+ *
+ * Throws if a strategy with the same name is already registered.
+ */
+export function registerShardStrategy(registration: CustomShardStrategyRegistration): void {
+    const { name, strategy, configShape = {} } = registration;
+
+    if (STRATEGY_REGISTRY.has(name)) {
+        throw new ShardConfigError(
+            `Shard strategy "${name}" is already registered. Use a different name.`,
+        );
+    }
+
+    STRATEGY_REGISTRY.set(name, () => strategy);
 }

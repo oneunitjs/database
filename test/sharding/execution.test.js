@@ -277,6 +277,116 @@ describe("sharding pool management", () => {
     });
 });
 
+describe("sharding routing diagnostics", () => {
+    const mockQuery = vi.fn();
+    const mockConnect = vi.fn();
+    const mockRelease = vi.fn();
+    const mockEnd = vi.fn();
+    const mockOn = vi.fn();
+
+    vi.mock("pg", async (importOriginal) => {
+        const actual = await importOriginal();
+        return {
+            ...actual,
+            Pool: vi.fn().mockImplementation(() => ({
+                query: mockQuery,
+                connect: mockConnect,
+                release: mockRelease,
+                end: mockEnd,
+                on: mockOn,
+                totalCount: 0,
+                idleCount: 0,
+                waitingCount: 0,
+            })),
+        };
+    });
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mockConnect.mockResolvedValue({
+            query: mockQuery,
+            release: mockRelease,
+        });
+        mockQuery.mockImplementation((sql) => {
+            const s = typeof sql === "string" ? sql : String(sql);
+            const isInsert = s.trim().toUpperCase().startsWith("INSERT");
+            return Promise.resolve({ rows: [], rowCount: isInsert ? 1 : 0 });
+        });
+    });
+
+    afterEach(() => {
+        vi.clearAllMocks();
+    });
+
+    function makeDb() {
+        return createDatabase({
+            sharding: {
+                enabled: true,
+                strategy: "hash",
+                shards: [
+                    makeShardConfig("shard-0", "postgresql://localhost:5432/s0"),
+                    makeShardConfig("shard-1", "postgresql://localhost:5432/s1"),
+                    makeShardConfig("shard-2", "postgresql://localhost:5432/s2"),
+                ],
+            },
+        });
+    }
+
+    it("getRoutingDiagnostics returns empty before any routes", () => {
+        const db = makeDb();
+        const diag = db.sharding.getRoutingDiagnostics();
+        expect(diag.recent).toEqual([]);
+        expect(diag.totalRoutes).toBe(0);
+        expect(diag.byStrategy).toEqual({});
+        expect(diag.byShard).toEqual({});
+        expect(typeof diag.clear).toBe("function");
+    });
+
+    it("getRoutingDiagnostics records each route", async () => {
+        const db = makeDb();
+        mockQuery.mockResolvedValue({ rows: [{ id: 1 }], rowCount: 1 });
+
+        await db.sharding.query("user-1", "SELECT 1");
+        await db.sharding.query("user-2", "SELECT 1");
+        await db.sharding.query("user-1", "SELECT 1");
+
+        const diag = db.sharding.getRoutingDiagnostics();
+        expect(diag.totalRoutes).toBe(3);
+        expect(diag.recent.length).toBe(3);
+        expect(diag.recent[0].shardKey).toBe("user-1");
+        expect(diag.recent[1].shardKey).toBe("user-2");
+        expect(diag.recent[2].shardKey).toBe("user-1");
+        expect(diag.byStrategy.hash).toBe(3);
+        const totalByShard = Object.values(diag.byShard).reduce((a, b) => a + b, 0);
+        expect(totalByShard).toBe(3);
+    });
+
+    it("getRoutingDiagnostics.clear resets all counters", async () => {
+        const db = makeDb();
+        mockQuery.mockResolvedValue({ rows: [{ id: 1 }], rowCount: 1 });
+
+        await db.sharding.query("user-1", "SELECT 1");
+        let diag = db.sharding.getRoutingDiagnostics();
+        expect(diag.totalRoutes).toBe(1);
+
+        diag.clear();
+        diag = db.sharding.getRoutingDiagnostics();
+        expect(diag.totalRoutes).toBe(0);
+        expect(diag.recent).toEqual([]);
+        expect(diag.byStrategy).toEqual({});
+        expect(diag.byShard).toEqual({});
+    });
+
+    it("getRoutingDiagnostics returns empty when sharding disabled", () => {
+        const db = createDatabase({
+            connectionString: "postgresql://localhost:5432/app",
+        });
+        const diag = db.sharding.getRoutingDiagnostics();
+        expect(diag.recent).toEqual([]);
+        expect(diag.totalRoutes).toBe(0);
+    });
+});
+
 describe("sharding backwards compatibility", () => {
     beforeEach(() => {
         resetMocks();

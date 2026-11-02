@@ -7,7 +7,7 @@ function isFragment(value: unknown): value is QueryFragment {
 }
 
 function makeFragment(text: string, values: unknown[]): QueryFragment {
-    return { [FRAGMENT]: true, text, values };
+    return { [FRAGMENT]: true, text, values } as QueryFragment;
 }
 
 /**
@@ -62,7 +62,7 @@ export function identifier(name: string): QueryFragment {
  * Fragments produced by this helper nest; arrays expand into comma-separated
  * placeholders. Empty arrays produce `FALSE` for IN clauses.
  */
-export function sql(strings: TemplateStringsArray, ...values: QueryLike[]): QueryFragment {
+export const sql: SqlFn = function sql(strings: TemplateStringsArray, ...values: QueryLike[]): QueryFragment {
     let text = "";
     const params: unknown[] = [];
 
@@ -102,7 +102,7 @@ export function sql(strings: TemplateStringsArray, ...values: QueryLike[]): Quer
     });
 
     return makeFragment(text, params);
-}
+};
 
 function shiftFragment(fragment: QueryFragment, offset: number): { text: string; values: unknown[] } {
     if (fragment.values.length === 0) {
@@ -114,6 +114,18 @@ function shiftFragment(fragment: QueryFragment, offset: number): { text: string;
     });
 
     return { text, values: fragment.values };
+}
+
+function formatWindowOrder(orderBy: string[]): string {
+    return orderBy
+        .map((entry) => {
+            const match = String(entry).trim().match(/^(.+?)\s+(ASC|DESC)$/i);
+            if (match) {
+                return `${quoteIdent(match[1])} ${match[2].toUpperCase()}`;
+            }
+            return quoteIdent(entry);
+        })
+        .join(", ");
 }
 
 sql.raw = raw;
@@ -182,7 +194,7 @@ export function rowNumber(partitionBy?: string[], orderBy?: string[]): QueryFrag
     }
     
     if (orderBy && orderBy.length > 0) {
-        parts.push(`ORDER BY ${orderBy.map(o => quoteIdent(o)).join(", ")}`);
+        parts.push(`ORDER BY ${formatWindowOrder(orderBy)}`);
     }
     
     parts.push(")");
@@ -200,7 +212,7 @@ export function rank(partitionBy?: string[], orderBy?: string[]): QueryFragment 
     }
     
     if (orderBy && orderBy.length > 0) {
-        parts.push(`ORDER BY ${orderBy.map(o => quoteIdent(o)).join(", ")}`);
+        parts.push(`ORDER BY ${formatWindowOrder(orderBy)}`);
     }
     
     parts.push(")");
@@ -218,7 +230,7 @@ export function denseRank(partitionBy?: string[], orderBy?: string[]): QueryFrag
     }
     
     if (orderBy && orderBy.length > 0) {
-        parts.push(`ORDER BY ${orderBy.map(o => quoteIdent(o)).join(", ")}`);
+        parts.push(`ORDER BY ${formatWindowOrder(orderBy)}`);
     }
     
     parts.push(")");
@@ -232,9 +244,22 @@ export function denseRank(partitionBy?: string[], orderBy?: string[]): QueryFrag
  * const w = sql.window('ranking', { partitionBy: ['dept'], orderBy: ['salary DESC'] });
  * sql`RANK() OVER ${w}`
  */
-export function window(name: string, options: { partitionBy?: string[]; orderBy?: string[] }): QueryFragment {
-    const parts: string[] = [quoteIdent(name)];
-    return raw(parts.join(" "));
+export function window(name: string, options: { partitionBy?: string[]; orderBy?: string[] } = {}): QueryFragment {
+    const inner: string[] = [];
+
+    if (options.partitionBy && options.partitionBy.length > 0) {
+        inner.push(`PARTITION BY ${options.partitionBy.map((p) => quoteIdent(p)).join(", ")}`);
+    }
+
+    if (options.orderBy && options.orderBy.length > 0) {
+        inner.push(`ORDER BY ${formatWindowOrder(options.orderBy)}`);
+    }
+
+    if (inner.length === 0) {
+        return raw(quoteIdent(name));
+    }
+
+    return raw(`(${inner.join(" ")})`);
 }
 
 // ==================== JSON Operator Helpers ====================
@@ -266,7 +291,8 @@ export function jsonGet(column: string, path: string): QueryFragment {
  * sql`${jsonContains('metadata', { color: 'blue' })}`
  */
 export function jsonContains(column: string, value: unknown): QueryFragment {
-    return raw(`${quoteIdent(column)} @> $1`);
+    const payload = typeof value === "string" ? value : JSON.stringify(value);
+    return makeFragment(`${quoteIdent(column)} @> $1`, [payload]);
 }
 
 /**
@@ -276,7 +302,8 @@ export function jsonContains(column: string, value: unknown): QueryFragment {
  * sql`${jsonContained('metadata', { color: 'blue', size: 'large' })}`
  */
 export function jsonContained(column: string, value: unknown): QueryFragment {
-    return raw(`${quoteIdent(column)} <@ $1`);
+    const payload = typeof value === "string" ? value : JSON.stringify(value);
+    return makeFragment(`${quoteIdent(column)} <@ $1`, [payload]);
 }
 
 /**
@@ -402,6 +429,25 @@ export function jsonAgg(column: string): QueryFragment {
 export function jsonObjectAgg(key: string, value: string): QueryFragment {
     return raw(`JSON_OBJECT_AGG(${quoteIdent(key)}, ${quoteIdent(value)})`);
 }
+
+sql.rowNumber = rowNumber;
+sql.rank = rank;
+sql.denseRank = denseRank;
+sql.window = window;
+sql.jsonGetText = jsonGetText;
+sql.jsonGet = jsonGet;
+sql.jsonContains = jsonContains;
+sql.jsonContained = jsonContained;
+sql.jsonArrayLength = jsonArrayLength;
+sql.jsonObjectKeys = jsonObjectKeys;
+sql.jsonPath = jsonPath;
+sql.quoteString = quoteString;
+sql.caseWhen = caseWhen;
+sql.countDistinct = countDistinct;
+sql.stringAgg = stringAgg;
+sql.arrayAgg = arrayAgg;
+sql.jsonAgg = jsonAgg;
+sql.jsonObjectAgg = jsonObjectAgg;
 
 export type { QueryFragment } from "../types.js";
 export type { SqlFn } from "../types.js";

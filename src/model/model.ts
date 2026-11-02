@@ -1,4 +1,4 @@
-import type { QueryBuilder as QueryBuilderType, QueryRunner, ModelFactory, Model, QueryResultRow, ModelFindOptions, ExtendedModelFindOptions, ModelOptions, ModelHooks, PoolClient } from "../types.js";
+import type { QueryBuilder as QueryBuilderType, QueryRunner, ModelFactory, Model, QueryResultRow, ModelFindOptions, ExtendedModelFindOptions, ModelOptions, ModelHooks, PoolClient, ModelSchema, ModelSchemaColumn } from "../types.js";
 import { QueryBuilder } from "../query/builder.js";
 import { raw } from "../query/sql.js";
 
@@ -45,12 +45,24 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
     relationships,
     coerce: coerceEnabled = false,
     coerceTypes,
+    defaultScope,
+    optimisticLocking,
+    introspectSchema: introspectSchemaOpt = false,
 }: ModelOptions<T> = { table: "" }): Model {
     if (!table) {
         throw new TypeError("createModel requires a table name");
     }
 
     const clientQuery = query as unknown as ClientCapableQuery | undefined;
+
+    // Make coerceTypes mutable for auto-population from introspection
+    let resolvedCoerceTypes: Record<string, 'string' | 'number' | 'boolean' | 'date'> | undefined = coerceTypes
+        ? { ...coerceTypes }
+        : undefined;
+
+    // Schema introspection state
+    let introspectedSchema: ModelSchema | null = null;
+    let introspectionDone = false;
 
     function builder(): QueryBuilderType {
         return new QueryBuilder({ query: query as QueryRunner, table, logger, shardKey, shardId });
@@ -64,6 +76,26 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
             return q.whereNull(softDeleteField);
         }
         return q;
+    }
+
+    /**
+     * Resolve and apply default scope WHERE conditions to a query.
+     * Returns false if the caller explicitly opted out (defaultScope: false).
+     */
+    async function applyDefaultScope(q: QueryBuilderType, scope: Record<string, unknown> | boolean = true): Promise<boolean> {
+        if (scope === false) {
+            return false;
+        }
+        let scopeData: Record<string, unknown>;
+        if (typeof defaultScope === "function") {
+            scopeData = await defaultScope();
+        } else {
+            scopeData = defaultScope ?? {};
+        }
+        if (scopeData && Object.keys(scopeData).length > 0) {
+            buildWhereClause(q, scopeData);
+        }
+        return true;
     }
 
     /**
@@ -166,7 +198,7 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
         if (!coerceEnabled) return data;
 
         const result: Record<string, unknown> = { ...data };
-        const types = coerceTypes ?? {};
+        const types = resolvedCoerceTypes ?? {};
 
         for (const [key, value] of Object.entries(result)) {
             const targetType = types[key];
@@ -404,6 +436,17 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
 
     async function run(builderInstance: QueryBuilderType, options: ModelFindOptions = {}): Promise<{ rows: QueryResultRow[] }> {
         const { text, values } = builderInstance.toSQL();
+
+        // Cache check before executing the query
+        const cache = options.cache;
+        if (cache) {
+            const key = `model:sql:${JSON.stringify([text, values])}`;
+            const cached = await cache.get(key);
+            if (cached !== undefined && cached !== null) {
+                return { rows: (cached as unknown[]) as QueryResultRow[] };
+            }
+        }
+
         // Merge model-level shard routing into per-call options. Per-call
         // shardKey/shardId take precedence over model-level configuration.
         const mergedOptions: ModelFindOptions = { ...options };
@@ -415,13 +458,23 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
         }
         if (options.client?.query) {
             const result = await options.client.query(text, values);
-            return { rows: (result?.rows ?? []) as QueryResultRow[] };
+            const rows = (result?.rows ?? []) as QueryResultRow[];
+            if (cache) {
+                const key = `model:sql:${JSON.stringify([text, values])}`;
+                await cache.set(key, rows);
+            }
+            return { rows };
         }
         if (!query) {
             throw new TypeError("No query function available");
         }
         const result = await query(text, values, mergedOptions);
-        return { rows: (result?.rows ?? []) as QueryResultRow[] };
+        const rows = (result?.rows ?? []) as QueryResultRow[];
+        if (cache) {
+            const key = `model:sql:${JSON.stringify([text, values])}`;
+            await cache.set(key, rows);
+        }
+        return { rows };
     }
 
     async function find(where: Record<string, unknown> | Array<Record<string, unknown>> = {}, options: ExtendedModelFindOptions = {}): Promise<QueryResultRow[]> {
@@ -432,6 +485,12 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
         
         // Build WHERE clause
         buildWhereClause(q, where as Record<string, unknown> | Array<Record<string, unknown>>);
+        
+        // Apply default scope if enabled
+        const scope = options.defaultScope ?? true;
+        if (scope !== false) {
+            await applyDefaultScope(q, typeof scope === "object" ? scope : true);
+        }
         
         // Apply ordering, limit, offset
         if (options.orderBy) {
@@ -560,6 +619,72 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
         return hookedResults.filter(Boolean) as QueryResultRow[];
     }
 
+    /**
+     * Bulk upsert: insert rows, and on conflict (matching conflictColumns),
+     * update the specified columns. Uses PostgreSQL ON CONFLICT DO UPDATE.
+     *
+     * @param rows - Array of records to upsert
+     * @param options.conflictColumns - Unique/constraint columns that trigger the conflict
+     * @param options.updateColumns - Columns to update on conflict (defaults to all non-conflict columns)
+     * @param options.returning - Columns to return (defaults to ["*"])
+     * @param options.atomic - Wrap in a transaction (default: true)
+     * @param options.client - Existing transaction client to join
+     */
+    async function bulkUpsert(
+        rows: Record<string, unknown>[],
+        options: ModelFindOptions & {
+            conflictColumns?: string[];
+            updateColumns?: string[];
+            atomic?: boolean;
+        } = {}
+    ): Promise<QueryResultRow[]> {
+        if (!Array.isArray(rows) || rows.length === 0) {
+            return [];
+        }
+
+        const { conflictColumns, updateColumns } = options;
+        if (!conflictColumns || conflictColumns.length === 0) {
+            throw new TypeError("bulkUpsert requires conflictColumns");
+        }
+
+        // Process each row: coerce, timestamps, validation, hooks
+        const processedRows = await Promise.all(rows.map(async row => {
+            let processed = coerceData(row);
+            processed = applyTimestamps(processed, 'create');
+            processed = await runValidation(processed, 'create');
+            processed = await runHook<Record<string, unknown>>('beforeCreate', processed);
+            return processed;
+        }));
+
+        // Determine update columns: all non-conflict columns if not specified
+        const allColumns = new Set<string>();
+        for (const row of processedRows) {
+            for (const key of Object.keys(row)) {
+                allColumns.add(key);
+            }
+        }
+
+        const updateCols = updateColumns ?? [...allColumns].filter((c) => !conflictColumns.includes(c));
+
+        const q = builder()
+            .insert(processedRows)
+            .returning(...((options.returning as string[]) ?? ["*"]))
+            .onConflict({
+                columns: conflictColumns,
+                update: updateCols,
+            });
+
+        const result = await runQuery(q, options);
+
+        // Run afterCreate hooks for all results
+        const finalResults = result.rows ?? [];
+        const hookedResults = await Promise.all(
+            finalResults.map((row) => runHook<QueryResultRow | null>('afterCreate', row))
+        );
+
+        return hookedResults.filter(Boolean) as QueryResultRow[];
+    }
+
     async function update(where: Record<string, unknown>, data: Record<string, unknown>, options: ModelFindOptions = {}): Promise<QueryResultRow[]> {
         // Coerce types
         let processedData = coerceData(data);
@@ -573,18 +698,49 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
         // Run beforeUpdate hook
         processedData = await runHook<Record<string, unknown>>('beforeUpdate', processedData, where);
         
+        // Optimistic locking: extract current version from WHERE clause
+        let versionColumn: string | undefined;
+        let currentVersion: unknown;
+        if (optimisticLocking) {
+            versionColumn = optimisticLocking.column;
+            currentVersion = where[versionColumn];
+            if (currentVersion === undefined) {
+                throw new TypeError(`Optimistic locking requires "${versionColumn}" in the WHERE clause`);
+            }
+            // Increment version in the update data
+            processedData[versionColumn] = Number(currentVersion) + 1;
+        }
+
         const q = builder().update(processedData).returning(...((options.returning as string[]) ?? ["*"]));
         
+        // Add version match to WHERE clause (optimistic locking)
+        if (optimisticLocking) {
+            q.where(versionColumn!, currentVersion);
+        }
+
         // Build WHERE clause with soft delete support
         if (softDeleteEnabled && !options.forceDelete) {
             // Only update non-deleted records
             const whereWithSoftDelete = { ...where, [softDeleteField]: null };
+            // Exclude version column from buildWhereClause when optimistic locking handles it
+            if (optimisticLocking) {
+                delete whereWithSoftDelete[versionColumn!];
+            }
             buildWhereClause(q, whereWithSoftDelete);
         } else {
-            buildWhereClause(q, where);
+            const whereForClause = { ...where };
+            if (optimisticLocking) {
+                delete whereForClause[versionColumn!];
+            }
+            buildWhereClause(q, whereForClause);
         }
         
         const result = await runQuery(q, options);
+        
+        // Optimistic locking: throw if no rows matched (version conflict)
+        if (optimisticLocking && result.rows.length === 0) {
+            throw new TypeError(`Optimistic lock conflict: no rows matched version ${currentVersion} on column "${versionColumn}"`);
+        }
         
         // Run afterUpdate hooks
         const finalResults = result.rows ?? [];
@@ -660,6 +816,12 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
         // Build WHERE clause
         buildWhereClause(q, where as Record<string, unknown> | Array<Record<string, unknown>>);
         
+        // Apply default scope if enabled
+        const scope = options.defaultScope ?? true;
+        if (scope !== false) {
+            await applyDefaultScope(q, typeof scope === "object" ? scope : true);
+        }
+        
         const result = await run(q, options);
         return (result?.rows?.[0]?.count as number) ?? 0;
     }
@@ -673,6 +835,12 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
         
         // Build WHERE clause
         buildWhereClause(q, where as Record<string, unknown> | Array<Record<string, unknown>>);
+        
+        // Apply default scope if enabled
+        const scopeExists = options.defaultScope ?? true;
+        if (scopeExists !== false) {
+            await applyDefaultScope(q, typeof scopeExists === "object" ? scopeExists : true);
+        }
         
         const result = await run(q, options);
         return Boolean(result?.rows?.length);
@@ -793,54 +961,56 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
     }
 
     /**
-     * Load related data for records (eager loading)
+     * Load related data for records (lazy relationship loading).
+     * Attaches related records to each parent record under the relationship name key.
      */
     async function loadRelated(
         records: QueryResultRow[],
         relationshipName: string,
-        dbInstance: unknown
+        getModel?: (modelName: string) => unknown
     ): Promise<QueryResultRow[]> {
         if (!relationships || !relationships[relationshipName]) {
             throw new TypeError(`Relationship '${relationshipName}' is not defined`);
         }
-        
+
         const relConfig = relationships[relationshipName];
-        const relatedModel = (dbInstance as any).model(relConfig.model);
-        
-        // Get IDs from parent records
+
+        // Get IDs from parent records first - return early if none
         const parentIds = records.map(r => r[idColumn]).filter(id => id !== undefined);
         if (parentIds.length === 0) {
             return records;
+        }
+
+        const resolveModel = getModel ?? ((name: string) => (query as any).model?.(name));
+        const relatedModel = resolveModel(relConfig.model);
+        if (!relatedModel) {
+            throw new TypeError("No model resolver available. Provide a getModel function or ensure query has a .model() method.");
         }
         
         let relatedRecords: QueryResultRow[] = [];
         
         switch (relConfig.type) {
             case 'hasMany': {
-                // For hasMany: foreignKey in related table points to this table
                 const fkHasMany = relConfig.foreignKey || `${table}_id`;
                 relatedRecords = await relatedModel.find({ [fkHasMany]: { $in: parentIds } });
                 break;
             }
             case 'belongsTo': {
-                // For belongsTo: foreignKey in this table points to related table
                 const fkBelongsTo = relConfig.foreignKey || `${relationshipName}_id`;
                 const relatedIdsBelongsTo = records.map(r => r[fkBelongsTo]).filter(id => id !== undefined);
                 relatedRecords = await relatedModel.find({ [idColumn]: { $in: relatedIdsBelongsTo } });
                 break;
             }
             case 'hasOne': {
-                // For hasOne: similar to hasMany but expect single record
                 const fkHasOne = relConfig.foreignKey || `${table}_id`;
                 relatedRecords = await relatedModel.find({ [fkHasOne]: { $in: parentIds } });
                 break;
             }
             case 'manyToMany': {
-                // For manyToMany: need to query through the join table
                 if (!relConfig.through) {
                     throw new TypeError(`Many-to-many relationship '${relationshipName}' requires a 'through' table`);
                 }
-                const throughModel = (dbInstance as any).model(relConfig.through);
+                const throughModel = resolveModel(relConfig.through);
                 const throughFk = relConfig.throughForeignKey || `${table}_id`;
                 const throughOtherFk = relConfig.throughOtherKey || `${relConfig.model}_id`;
                 
@@ -893,7 +1063,7 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
         let records = await find(where, options);
         
         for (const relName of include) {
-            records = await loadRelated(records, relName, query);
+            records = await loadRelated(records, relName, (name: string) => (query as any).model?.(name));
         }
         
         return records;
@@ -922,6 +1092,146 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
         return findOneWithIncludes({ [idColumn]: id }, options, include);
     }
 
+    /**
+     * Serialize a database row to a plain JSON-serializable object.
+     * Converts Date instances to ISO strings and Buffer to base64.
+     */
+    function serialize(row: QueryResultRow): Record<string, unknown> {
+        const result: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(row ?? {})) {
+            if (value instanceof Date) {
+                result[key] = value.toISOString();
+            } else if (Buffer.isBuffer(value)) {
+                result[key] = value.toString("base64");
+            } else if (Array.isArray(value)) {
+                result[key] = value.map((v) =>
+                    v instanceof Date ? v.toISOString() : v
+                );
+            } else if (isPlainObject(value)) {
+                result[key] = serialize(value as Record<string, unknown>);
+            } else {
+                result[key] = value;
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Hydrate a plain object into a model-compatible format.
+     * Converts ISO date strings back to Date instances for known date columns.
+     * When timestamps are enabled, converts created_at/updated_at automatically.
+     */
+    function hydrate(data: Record<string, unknown>): Record<string, unknown> {
+        const result: Record<string, unknown> = { ...data };
+        const dateColumns = new Set<string>();
+        if (timestampsEnabled) {
+            dateColumns.add(createdAtField);
+            dateColumns.add(updatedAtField);
+        }
+        if (softDeleteEnabled) {
+            dateColumns.add(softDeleteField);
+        }
+
+        for (const [key, value] of Object.entries(result)) {
+            if (typeof value === "string" && dateColumns.has(key)) {
+                const d = new Date(value);
+                if (!Number.isNaN(d.getTime())) {
+                    result[key] = d;
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Introspect the database schema for this model's table from
+     * information_schema.columns. Discovers column names, types, nullability,
+     * defaults, and character maximum length.
+     */
+    async function introspect(options: { schema?: string; force?: boolean } = {}): Promise<ModelSchema> {
+        if (introspectionDone && introspectedSchema && !options.force) {
+            return introspectedSchema;
+        }
+
+        const targetSchema = options.schema ?? (typeof introspectSchemaOpt === "object" ? introspectSchemaOpt.schema : undefined) ?? "public";
+
+        const sql = `
+            SELECT 
+                column_name AS name,
+                data_type,
+                is_nullable,
+                column_default,
+                character_maximum_length,
+                numeric_precision,
+                numeric_scale,
+                ordinal_position
+            FROM information_schema.columns
+            WHERE table_schema = $1
+              AND table_name = $2
+            ORDER BY ordinal_position
+        `;
+
+        if (!query) {
+            throw new TypeError("No query function available for schema introspection");
+        }
+        const result = await query(sql, [targetSchema, table]);
+        const rows = (result?.rows ?? []) as Record<string, unknown>[];
+
+        // Map snake_case column names from information_schema to camelCase
+        const columns: ModelSchemaColumn[] = rows.map((row) => ({
+            name: String(row.name),
+            dataType: String(row.data_type),
+            isNullable: row.is_nullable as "YES" | "NO",
+            columnDefault: row.column_default as string | null,
+            characterMaximumLength: row.character_maximum_length as number | null,
+            numericPrecision: row.numeric_precision as number | null,
+            numericScale: row.numeric_scale as number | null,
+            ordinalPosition: Number(row.ordinal_position),
+        }));
+
+        const schema: ModelSchema = {
+            table,
+            schema: targetSchema,
+            columns,
+            columnMap: {},
+        };
+
+        for (const col of columns) {
+            schema.columnMap[col.name] = col;
+        }
+
+        // Auto-populate coerceTypes from discovered column types
+        const shouldAutoCoerce =
+            introspectSchemaOpt === true ||
+            (typeof introspectSchemaOpt === "object" && introspectSchemaOpt.autoCoerceTypes === true);
+
+        if (shouldAutoCoerce && resolvedCoerceTypes) {
+            for (const col of columns) {
+                const dt = col.dataType.toLowerCase();
+                if (dt.includes("int") || dt.includes("numeric") || dt.includes("decimal") || dt.includes("float") || dt.includes("serial")) {
+                    resolvedCoerceTypes[col.name] = "number";
+                } else if (dt.includes("bool")) {
+                    resolvedCoerceTypes[col.name] = "boolean";
+                } else if (dt.includes("date") || dt.includes("time") || dt.includes("timestamp")) {
+                    resolvedCoerceTypes[col.name] = "date";
+                } else {
+                    resolvedCoerceTypes[col.name] = "string";
+                }
+            }
+        }
+
+        introspectedSchema = schema;
+        introspectionDone = true;
+        return schema;
+    }
+
+    /**
+     * Get the last introspected schema, or null if not yet introspected.
+     */
+    function getSchema(): ModelSchema | null {
+        return introspectedSchema;
+    }
+
     return {
         table,
         idColumn,
@@ -933,6 +1243,7 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
         findById,
         insert,
         insertMany,
+        bulkUpsert,
         update,
         updateById,
         delete: remove,
@@ -960,7 +1271,14 @@ export function createModel<T extends QueryResultRow = QueryResultRow>({
         hooks: hooks as ModelHooks<QueryResultRow> | undefined,
         validate: validate as ((data: Record<string, unknown>, operation: 'create' | 'update') => Record<string, unknown> | Promise<Record<string, unknown>>) | undefined,
         relationships,
+        loadRelated,
         coerceEnabled,
+        defaultScope,
+        optimisticLocking,
+        serialize,
+        hydrate,
+        introspect,
+        getSchema,
         // Join methods
         join,
         innerJoin,

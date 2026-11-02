@@ -106,7 +106,12 @@ export function createClient(
         }
 
         return new Promise((resolve, reject) => {
+            let settled = false;
             const timer = setTimeout(() => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
                 reject(new TimeoutError(`Acquiring a connection timed out after ${timeoutMs}ms`, {
                     timeout: timeoutMs,
                 }));
@@ -114,10 +119,19 @@ export function createClient(
 
             pool.connect().then(
                 (client) => {
+                    if (settled) {
+                        client.release?.();
+                        return;
+                    }
+                    settled = true;
                     clearTimeout(timer);
                     resolve(trackManualClient(client));
                 },
                 (error) => {
+                    if (settled) {
+                        return;
+                    }
+                    settled = true;
                     clearTimeout(timer);
                     reject(error);
                 },
@@ -154,44 +168,65 @@ export function createClient(
         return client;
     }
 
-    function runQuery(
-        client: PoolClient,
-        config: QueryConfig,
-        timeoutMs: number,
-        markDestroy: () => void,
-    ): Promise<QueryResult> {
-        if (!timeoutMs) {
-            return client.query(config);
-        }
-
-        return new Promise<QueryResult>((resolve, reject) => {
-            let settled = false;
-            const timer = setTimeout(() => {
-                if (settled) {
-                    return;
-                }
-                settled = true;
-                markDestroy();
-                reject(new TimeoutError(`Query timed out after ${timeoutMs}ms`, {
-                    timeout: timeoutMs,
-                }));
-            }, timeoutMs);
-
-            const finish = (handler: (value: QueryResult) => void) => (value: QueryResult) => {
-                if (settled) {
-                    return;
-                }
-                settled = true;
-                clearTimeout(timer);
-                handler(value);
-            };
-
-            client.query(config).then(
-                finish(resolve),
-                finish(reject),
-            );
-        });
+function runQuery(
+    client: PoolClient,
+    config: QueryConfig,
+    timeoutMs: number,
+    markDestroy: () => void,
+    cancelOnTimeout: boolean,
+): Promise<QueryResult> {
+    if (!timeoutMs) {
+        return client.query(config);
     }
+
+    return new Promise<QueryResult>((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            if (cancelOnTimeout) {
+                cancelClientQuery(client);
+            }
+            markDestroy();
+            reject(new TimeoutError(`Query timed out after ${timeoutMs}ms`, {
+                timeout: timeoutMs,
+            }));
+        }, timeoutMs);
+
+        const finish = (handler: (value: QueryResult) => void) => (value: QueryResult) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            clearTimeout(timer);
+            handler(value);
+        };
+
+        client.query(config).then(
+            finish(resolve),
+            finish(reject),
+        );
+    });
+}
+
+/**
+ * Attempt to cancel the currently active query on a PostgreSQL client using
+ * pg's built-in cancellation support. Sends a CancelRequest to the server so
+ * the in-flight query is terminated rather than left running until it
+ * completes naturally. Safe to call when no query is active (no-op).
+ */
+function cancelClientQuery(client: PoolClient): void {
+    try {
+        const activeQuery = (client as { _getActiveQuery?: () => unknown })._getActiveQuery?.();
+        if (activeQuery) {
+            (client as unknown as { cancel: (c: PoolClient, q: unknown) => void }).cancel(client, activeQuery);
+        }
+    } catch {
+        // Cancellation is best-effort; ignore failures.
+    }
+}
 
     async function executeOnce(config: QueryConfig, queryOptions: QueryOptions): Promise<QueryResult> {
         const client = await getClient(queryOptions);
@@ -215,6 +250,7 @@ export function createClient(
 
         try {
             const queryTimeout = queryOptions.timeout ?? defaultTimeout;
+            const cancelOnTimeout = queryOptions.cancel !== false;
 
             const result = await runQuery(
                 client,
@@ -223,6 +259,7 @@ export function createClient(
                 () => {
                     destroy = true;
                 },
+                cancelOnTimeout,
             );
 
             context.rowCount = result?.rowCount ?? undefined;
@@ -294,6 +331,15 @@ export function createClient(
     }
 
     /**
+     * Cancel the currently active query on a client using PostgreSQL's
+     * cancellation support. Sends a CancelRequest to the server so the
+     * in-flight query is terminated. Safe to call when no query is active.
+     */
+    function cancel(client: PoolClient): void {
+        cancelClientQuery(client);
+    }
+
+    /**
      * Create a named prepared-statement handle. PostgreSQL caches the parsed
      * statement per connection, so the handle is safe to reuse across calls.
      */
@@ -323,6 +369,7 @@ export function createClient(
         query,
         queryOne,
         releaseClient,
+        cancel,
         prepare,
         prepared,
         hooks,

@@ -68,6 +68,7 @@ src/
 ├── schema/                     # DDL & migration layer
 │   ├── index.ts                # Barrel
 │   ├── schema.ts               # createSchemaManager() — facade
+│   ├── introspect.ts           # Schema introspection helpers
 │   ├── create.ts               # CREATE TABLE, CREATE INDEX
 │   ├── alter.ts                # ALTER TABLE (add/drop/rename/alter columns)
 │   ├── drop.ts                 # DROP TABLE, DROP INDEX
@@ -87,9 +88,10 @@ src/
 │   ├── shard-health.ts         # ShardHealth — per-shard health checks
 │   ├── shard-metrics.ts        # ShardMetrics — per-shard counters
 │   ├── shard-migration.ts      # ShardMigrationTracker — cross-shard migration status
+│   ├── shard-rebalance-tracker.ts # ShardRebalanceTracker — rebalance progress tracking
 │   ├── shard-execution-context.ts — ShardExecutionContext + OperationType
 │   ├── strategies.ts           # All 9 shard strategy implementations
-│   ├── errors.ts               # ShardNotFoundError, ShardConfigError, etc.
+│   └── errors.ts               # ShardNotFoundError, ShardConfigError, etc.
 │
 ├── replication/                # Primary / read-replica routing
 │   ├── index.ts                # Barrel
@@ -1421,7 +1423,46 @@ The `db.sharding` surface exposes:
 - `metrics` — per-shard counters and routing observability
 - `executeOnShard(id, callback)` — dedicated connection for DDL/admin
 - `distributedTx` — coordinator instance
+- `rebalanceTracker` — ShardRebalanceTracker instance for managing rebalance operations
 - `isClosed`
+
+### ShardRebalanceTracker (`sharding/shard-rebalance-tracker.ts`)
+
+In-memory tracker for shard rebalance progress, providing primitives for creating, updating, querying, and completing rebalance operations. **Note**: This is an in-memory implementation — for production use, wrap with persistent storage.
+
+**Key Features**:
+- `createRebalance(sourceShardId, destinationShardId, totalKeys)` — Creates a new rebalance operation with unique ID
+- `updateProgress(rebalanceId, update)` — Updates progress metrics (movedKeys, failedKeys, skippedKeys) with automatic percentage calculation
+- `getRebalance(rebalanceId)` — Retrieves a specific rebalance operation
+- `listRebalances()` — Lists all active rebalance operations
+- `completeRebalance(rebalanceId)` — Marks a rebalance as completed
+- `failRebalance(rebalanceId, error)` — Marks a rebalance as failed with error
+- `cancelRebalance(rebalanceId)` — Cancels a rebalance operation
+- `clearCompleted()` — Removes completed/failed/cancelled operations from memory
+
+**ShardRebalanceProgress Interface**:
+```typescript
+{
+  rebalanceId: string;           // Unique identifier
+  sourceShardId: string;        // Source shard identifier
+  destinationShardId: string;   // Destination shard identifier
+  totalKeys: number;            // Total keys to migrate
+  movedKeys: number;            // Successfully moved keys
+  failedKeys: number;           // Failed key migrations
+  skippedKeys: number;          // Skipped keys
+  percentage: number;           // Completion percentage (0-100)
+  status: "planning" | "copying" | "validating" | "cutting-over" | "completed" | "failed" | "cancelled";
+  startedAt: string;            // ISO timestamp
+  updatedAt: string;            // ISO timestamp
+  estimatedCompletionAt?: string; // Optional estimated completion
+  errors: string[];             // Error messages
+}
+```
+
+**Automatic State Transitions**:
+- Automatically transitions to `"completed"` when `movedKeys + failedKeys + skippedKeys >= totalKeys`
+- Prevents state changes on terminal states (completed, failed, cancelled)
+- Percentage is automatically recalculated when movedKeys or totalKeys change
 
 ### Write Fencing
 
@@ -1434,6 +1475,8 @@ When an online resharding migration is active, sharded writes acquire a shared a
 ### Overview
 
 Replication routes queries between one PostgreSQL primary and zero or more read replicas. The package configures **client connections** to those replicas — it does not create, promote, or fail over replicas. Routing is driven entirely by an explicit `readPreference` on query options — **never** by parsing SQL.
+
+This layer enables read scaling by distributing read queries across replicas while ensuring write operations always go to the primary. It provides lag-aware routing to avoid stale reads.
 
 ### ReplicationManager (`replication/replication-manager.ts`)
 
@@ -1449,20 +1492,59 @@ Manages one primary pool plus zero or more replica pools:
 - Health checks measure connectivity and replication lag (`pg_last_xact_replay_timestamp()`)
 - `lagThresholdMs` excludes replicas whose known lag exceeds the threshold
 - `addReplica()` / `removeReplica()` — runtime topology changes with drain-and-wait
+- `validateReplicationConfig()` — validates configuration before use
+
+**Configuration Options**:
+```typescript
+interface ReplicationManagerOptions {
+  primary: PoolConfig;
+  replicas: PoolConfig[];
+  lagThresholdMs?: number;       // Default: 1000 (1 second)
+  healthCheckIntervalMs?: number; // Default: 10000 (10 seconds)
+}
+```
 
 ### ReplicationRouter (`replication/replication-router.ts`)
 
 Selects read endpoints based on `readPreference` and endpoint health/lag state. Rebuilt whenever health state changes (`syncRouter()`).
 
+**Functions**:
+- `isReplicaEligible(replica, lagThresholdMs)` — Checks if replica meets health and lag requirements
+- `selectEndpoint(preference, endpoints)` — Selects appropriate endpoint based on preference
+
+**Endpoint Types**:
+```typescript
+interface ReplicationEndpoint {
+  id: string;
+  pool: Pool;
+  role: "primary" | "replica";
+  healthStatus: "healthy" | "unhealthy" | "unknown";
+  lagMs?: number;
+  lastCheckedAt?: string;
+}
+```
+
 ### Replication API (`database.ts` → `buildReplicationApi()`)
 
 The `db.replication` surface exposes:
 
-- `enabled`, `mode`, `primaryEndpointId`, `replicaEndpointIds`
-- `health()`, `endpointHealth(id)`
-- `primaryPool` — bypasses router for writes/admin
-- `readEndpoint(preference)` — or `null` if none eligible
-- `shutdown()`, `isClosed`
+- `enabled`: boolean — whether replication is configured
+- `mode`: ReplicationMode — current replication mode
+- `primaryEndpointId`: string — ID of the primary endpoint
+- `replicaEndpointIds`: string[] — IDs of all replica endpoints
+- `health()`: ReplicationHealthResult — overall health status
+- `endpointHealth(id)`: ReplicationEndpointHealth — health of specific endpoint
+- `primaryPool`: Pool — direct access to primary pool (bypasses router)
+- `readEndpoint(preference)`: Pool | null — get endpoint based on preference
+- `shutdown()`: Promise<void> — close all pools
+- `isClosed`: boolean — whether replication is closed
+
+**Error Types**:
+- `ReplicationConfigError` — Invalid configuration
+- `ReplicaUnavailableError` — No eligible replicas available
+- `PrimaryUnavailableError` — Primary is unavailable
+- `WriteToReplicaError` — Attempted to write to replica
+- `ReadPreferenceError` — Invalid read preference specified
 
 ---
 
@@ -1529,26 +1611,120 @@ Coordinated cutover: acquire write barrier (exclusive advisory lock), drain chan
 
 ### Overview
 
-Cross-shard two-phase commit (2PC) coordinator. Requires `max_prepared_transactions > 0` on all participating PostgreSQL servers. Throws `MaxPreparedTransactionsError` if not configured.
+Cross-shard two-phase commit (2PC) coordinator. Enables atomic transactions across multiple PostgreSQL databases (shards). Requires `max_prepared_transactions > 0` on all participating PostgreSQL servers. Throws `MaxPreparedTransactionsError` if not configured.
+
+This layer is essential for maintaining data consistency when a single logical operation must update multiple shards atomically.
 
 ### DistributedTransactionCoordinator (`distributed-tx/distributed-transaction-coordinator.ts`)
 
-Manages the 2PC lifecycle:
+Manages the 2PC lifecycle with comprehensive error handling and recovery:
 
-1. `begin(options)` → transaction ID, registers participant pools
-2. `execute(shardKey, text, values, options)` via `DistributedTransactionContext` — runs SQL on specific shard within the transaction
-3. `prepare(transactionId)` — Phase 1: PREPARE TRANSACTION on all participants
-4. `commit(transactionId)` — Phase 2: COMMIT PREPARED on all participants
-5. `abort(transactionId)` — ROLLBACK PREPARED on all participants
-6. `getStatus(transactionId)` — durable status inspection
+1. **`begin(options)`** → Returns `{ transactionId, context }`
+   - Generates unique transaction ID
+   - Registers all participant shards
+   - Creates durable transaction record
+   
+2. **`execute(transactionId, shardKey, text, values, options)`** via `DistributedTransactionContext`
+   - Runs SQL on specific shard within the distributed transaction
+   - Tracks statements for later prepare/commit/abort
+   - Returns query results
+
+3. **`prepare(transactionId)`** — Phase 1: PREPARE TRANSACTION
+   - Executes `PREPARE TRANSACTION 'tx-id'` on all participant pools
+   - If any participant fails to prepare, all others are rolled back
+   - Durable state: `"prepared"`
+
+4. **`commit(transactionId)`** — Phase 2: COMMIT PREPARED
+   - Executes `COMMIT PREPARED 'tx-id'` on all participants
+   - If commit fails on any participant, others are rolled back
+   - Durable state: `"committed"`
+
+5. **`abort(transactionId)`** — Rollback PREPARED
+   - Executes `ROLLBACK PREPARED 'tx-id'` on all participants
+   - Durable state: `"aborted"`
+
+6. **`getStatus(transactionId)`** — Durable status inspection
+   - Returns current state and participant statuses
+   - Useful for recovery and monitoring
+
+**Configuration Options**:
+```typescript
+interface DistributedTxCoordinatorOptions {
+  prepareTimeoutMs?: number;   // Default: 30000 (30 seconds)
+  commitTimeoutMs?: number;    // Default: 30000 (30 seconds)
+  maxRetries?: number;          // Default: 3
+}
+```
 
 ### DistributedTransactionContext
 
-Provides `execute(shardKey, text, values, options)` for running SQL on specific shards within the distributed transaction. All operations are prepared atomically and committed or aborted together.
+Provides a fluent interface for executing SQL on specific shards within a distributed transaction:
+
+```typescript
+const { transactionId, context } = await db.distributedTx.begin();
+
+try {
+  // Execute on shard A
+  const result1 = await context.execute(
+    { shardKey: "user123" },
+    "UPDATE users SET balance = balance - $1 WHERE id = $2",
+    [100, "user123"]
+  );
+
+  // Execute on shard B
+  const result2 = await context.execute(
+    { shardId: "shard-b" },
+    "UPDATE audits SET amount = amount + $1 WHERE user_id = $2",
+    [100, "user123"]
+  );
+
+  // Prepare and commit
+  await db.distributedTx.prepare(transactionId);
+  await db.distributedTx.commit(transactionId);
+} catch (error) {
+  await db.distributedTx.abort(transactionId);
+  throw error;
+}
+```
+
+**Execute Options**:
+```typescript
+interface DistributedTransactionExecuteOptions {
+  timeoutMs?: number;
+  retryOnDeadlock?: boolean;
+}
+```
+
+### Participant Management
+
+**ParticipantContext Type**:
+```typescript
+interface ParticipantContext {
+  shardId: string;
+  pool: Pool;
+  prepared: boolean;
+  error?: Error;
+}
+```
+
+The coordinator tracks all participants and their states throughout the 2PC lifecycle.
 
 ### Coordination Schema
 
-Durable tables store transaction state, participant lists, and prepared transaction identifiers for crash recovery.
+Durable tables store transaction state, participant lists, and prepared transaction identifiers for crash recovery:
+
+- `distributed_transactions` — Transaction records with state and timestamps
+- `distributed_transaction_participants` — Participant shards and their states
+- Uses advisory locks for coordination during state transitions
+
+**States**: `"pending"` → `"prepared"` → `"committed"` | `"aborted"` | `"failed"`
+
+### Error Types
+
+- `DistributedTransactionError` — Base error type for distributed transaction failures
+- `DistributedTxNotFoundError` — Transaction ID not found
+- `DistributedTxAlreadyResolvedError` — Transaction already committed or aborted
+- `MaxPreparedTransactionsError` — PostgreSQL `max_prepared_transactions` exceeded
 
 ---
 
@@ -1556,19 +1732,173 @@ Durable tables store transaction state, participant lists, and prepared transact
 
 ### Overview
 
-High-availability provider and state machine for managing primary/replica failover. States: `ACTIVE` → `DRAINING` → `DRAINED` → `REMOVED`.
+High-availability provider and state machine for managing primary/replica failover. Provides automatic and manual failover capabilities for PostgreSQL clusters with primary-replica replication. States: `ACTIVE` → `DRAINING` → `DRAINED` → `REMOVED`.
+
+This layer enables applications to maintain availability during primary failures by automatically or manually promoting replicas to primary status.
 
 ### FailoverManager (`failover/failover-manager.ts`)
 
-Controls failover operations, serializing topology changes via mutex.
+Controls failover operations, serializing topology changes via mutex to ensure consistency:
 
-### HAProvider (`failover/ha-provider.ts`)
+- Manages HA provider instances (StaticHaProvider, PatroniHaProvider)
+- Tracks current failover state
+- Coordinates failover transitions
+- Provides health checks and status reporting
+- Handles split-brain prevention
 
-Switches traffic from primary to replica when primary is down. State is not persisted across process restarts.
+**Key Functions**:
+- `createInitialFailoverState()` — Creates initial state for a new setup
+- `applyFailoverTransition(currentState, event)` — Applies state transition based on event
+- `nextFailoverState(currentState, event)` — Computes next state without applying
+- `createFailoverEvent(type, context)` — Creates a failover event for state transitions
+
+### HA Providers
+
+Two HA provider implementations are available:
+
+**StaticHaProvider (`failover/ha-provider.ts`)**
+- Static configuration of primary and replicas
+- Manual failover triggered via API calls
+- No external dependencies
+- Suitable for simple deployments
+
+**PatroniHaProvider (`failover/ha-provider.ts`)**
+- Integrates with Patroni (PostgreSQL HA solution)
+- Automatically detects primary from Patroni REST API
+- Monitors Patroni health and leader status
+- Suitable for production Patroni deployments
+
+**HAProvider Interface**:
+```typescript
+interface HaProvider {
+  getTopology(): Promise<HaTopology>;
+  getPrimaryNode(): Promise<HaNodeInfo | null>;
+  getReplicaNodes(): Promise<HaNodeInfo[]>;
+  promoteReplica(nodeId: string): Promise<void>;
+  failover(): Promise<void>;
+  healthCheck(): Promise<HaNodeStatus>;
+}
+```
 
 ### FailoverStateMachine (`failover/failover-state-machine.ts`)
 
-Enforces state transitions and tracks active operations for drain-and-wait semantics.
+Enforces legal state transitions and tracks active operations for drain-and-wait semantics:
+
+**State Types**:
+```typescript
+type HaNodeRole = "primary" | "replica" | "standby" | "unknown";
+type HaNodeStatus = "healthy" | "degraded" | "unhealthy" | "unknown";
+type FailoverState = 
+  | "active"          // Normal operation, primary available
+  | "degraded"        // Primary available but replicas unhealthy
+  | "failover"        // Failover in progress
+  | "split-brain"     // Multiple primaries detected
+  | "no-primary"      // No primary available
+  | "unknown";        // Initial state
+```
+
+**State Transition Rules**:
+- `ACTIVE` → `FAILOVER` — When primary becomes unhealthy
+- `ACTIVE` → `DEGRADED` — When replicas become unhealthy
+- `FAILOVER` → `ACTIVE` — When new primary is promoted
+- `FAILOVER` → `NO_PRIMARY` — When no replicas available for promotion
+- Any → `SPLIT_BRAIN` — When multiple primaries detected (prevents data divergence)
+
+**Terminal States**: `split-brain`, `no-primary`
+**Transient States**: `failover`, `degraded`
+**Stable State**: `active`
+
+**Functions**:
+- `isTerminalFailoverState(state)` — Checks if state is terminal
+- `isTransientFailoverState(state)` — Checks if state is transient
+
+### Failover Topology
+
+**Types**:
+```typescript
+interface HaNodeInfo {
+  id: string;
+  name: string;
+  role: HaNodeRole;
+  status: HaNodeStatus;
+  host: string;
+  port: number;
+  lastCheckedAt: string;
+}
+
+interface HaTopology {
+  nodes: HaNodeInfo[];
+  primaryNode?: HaNodeInfo;
+  replicaNodes: HaNodeInfo[];
+  version: number;
+  updatedAt: string;
+}
+
+interface FailoverConfig {
+  provider: "static" | "patroni";
+  staticConfig?: StaticHaConfig;
+  patroniConfig?: PatroniHaConfig;
+  healthCheckIntervalMs?: number;
+  failoverTimeoutMs?: number;
+}
+```
+
+### Failover Events
+
+**FailoverEvent Type**:
+```typescript
+interface FailoverEvent {
+  type: "primary-failed" | "replica-promoted" | "split-brain" | "health-changed";
+  fromState: FailoverState;
+  toState: FailoverState;
+  timestamp: string;
+  nodeId?: string;
+  error?: string;
+  metadata?: Record<string, unknown>;
+}
+```
+
+### Error Types
+
+- `FailoverError` — Base error type for failover failures
+- `FailoverNotSupportedError` — Operation not supported by current provider
+- `SplitBrainPreventedError` — Operation prevented to avoid split-brain
+- `PrimaryNotVerifiedError` — Primary status cannot be verified
+
+### Usage Example
+
+```typescript
+import { createDatabase, PatroniHaProvider } from "@oneunit/database";
+
+const db = createDatabase({
+  failover: {
+    provider: "patroni",
+    patroniConfig: {
+      restApiUrl: "http://patroni-cluster:8008",
+    },
+  },
+});
+
+// Get current topology
+const topology = await db.failover.getTopology();
+console.log("Primary:", topology.primaryNode);
+
+// Check health
+const health = await db.failover.healthCheck();
+
+// Handle failover events (via hooks)
+db.failover.on("state-change", (event) => {
+  console.log("State changed:", event.fromState, "->", event.toState);
+});
+```
+
+### Production Considerations
+
+- Use `PatroniHaProvider` for Patroni-managed clusters
+- Configure appropriate `healthCheckIntervalMs` (default: 10 seconds)
+- Set `failoverTimeoutMs` to match your SLA requirements
+- Monitor `split-brain` states and alert immediately
+- Test failover procedures regularly
 
 ---
 

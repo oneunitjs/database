@@ -6,7 +6,7 @@ import type {
     DistributedTxRecord,
     DistributedTxOptions,
 } from "../failover/failover-types.js";
-import { DatabaseError } from "../types.js";
+import { DatabaseError } from "../client/errors.js";
 import { DISTRIBUTED_TX_SCHEMA } from "./coordinator-schema.js";
 
 export class DistributedTransactionError extends DatabaseError {

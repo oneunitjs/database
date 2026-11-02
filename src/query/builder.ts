@@ -76,6 +76,36 @@ function assertInteger(value: unknown, name: string): number {
     return number;
 }
 
+/**
+ * Compile EXPLAIN options into a PostgreSQL-compatible option string.
+ * Returns empty string when no options are set (plain `EXPLAIN`).
+ */
+function _compileExplainOptions(options: {
+    analyze?: boolean;
+    verbose?: boolean;
+    buffers?: boolean;
+    costs?: boolean;
+    timing?: boolean;
+    summary?: boolean;
+    settings?: boolean;
+    format?: "text" | "json" | "xml" | "yaml";
+}): string {
+    const parts: string[] = [];
+    if (options.analyze) parts.push("ANALYZE");
+    if (options.buffers) parts.push("BUFFERS");
+    if (options.verbose) parts.push("VERBOSE");
+    if (options.costs === true) parts.push("COSTS");
+    if (options.timing === true) parts.push("TIMING");
+    if (options.summary === true) parts.push("SUMMARY");
+    if (options.settings === true) parts.push("SETTINGS");
+    if (options.format) parts.push(`FORMAT ${options.format.toUpperCase()}`);
+
+    if (parts.length === 0) {
+        return "";
+    }
+    return `(${parts.join(", ")})`;
+}
+
 interface WhereCondition {
     connector: "AND" | "OR";
     column?: string;
@@ -178,6 +208,7 @@ export class QueryBuilder implements QueryBuilderType {
     private _skipLocked: boolean = false;
     private _combinedQueries: CombinedQuery[] = [];
     private _queryLoggingContext: Record<string, unknown> = {};
+    private _explainOptions: { analyze?: boolean; verbose?: boolean; buffers?: boolean; costs?: boolean; format?: "text" | "json" | "xml" | "yaml"; timing?: boolean; summary?: boolean; settings?: boolean } | null = null;
 
     constructor({
         query,
@@ -206,7 +237,8 @@ export class QueryBuilder implements QueryBuilderType {
     clone(): QueryBuilder {
         const next = new QueryBuilder({ query: this._query, table: this._table, logger: this._logger });
         next._mode = this._mode;
-        next._params = this._params;
+        next._params = new ParamCollector();
+        next._params.values = [...this._params.values];
         next._wheres = this._wheres.map(w => ({
             ...w,
             conditions: w.conditions ? w.conditions.map(c => ({ ...c })) : undefined
@@ -251,6 +283,7 @@ export class QueryBuilder implements QueryBuilderType {
             query: c.query instanceof QueryBuilder ? c.query.clone() : c.query
         }));
         next._queryLoggingContext = { ...this._queryLoggingContext };
+        next._explainOptions = this._explainOptions;
         return next;
     }
 
@@ -645,6 +678,96 @@ export class QueryBuilder implements QueryBuilderType {
         return this;
     }
 
+    // ==================== Keyset Pagination ====================
+
+    /**
+     * Apply keyset pagination (seek method) using the last seen row values.
+     * More efficient than OFFSET for deep pagination because it avoids
+     * scanning and discarding skipped rows.
+     *
+     * Requires at least one `.orderBy()` clause. For each order column,
+     * adds a WHERE condition using `>` for ASC and `<` for DESC.
+     *
+     * @example
+     * // Page 2: get rows after the last seen id
+     * db.select().from('users')
+     *   .orderBy('id', 'ASC')
+     *   .keysetPagination({ id: lastId })
+     *   .limit(20);
+     * // => SELECT * FROM "users" WHERE "id" > $1 ORDER BY "id" ASC LIMIT $2
+     *
+     * @example
+     * // Composite keyset (id ASC, created_at DESC)
+     * db.select().from('orders')
+     *   .orderBy('id', 'ASC')
+     *   .orderBy('created_at', 'DESC')
+     *   .keysetPagination({ id: lastId, created_at: lastDate })
+     *   .limit(20);
+     */
+    keysetPagination(lastValues: Record<string, unknown>): this {
+        if (this._orders.length === 0) {
+            throw new TypeError("keysetPagination requires at least one orderBy clause");
+        }
+
+        const conditions: Array<{ column: string; operator: string; value: unknown }> = [];
+
+        for (const order of this._orders) {
+            const column = typeof order.column === "string" ? order.column : String(order.column);
+            const value = lastValues[column];
+
+            if (value === undefined) {
+                throw new TypeError(
+                    `keysetPagination requires a value for order column "${column}"`,
+                );
+            }
+
+            const isDesc = order.direction.startsWith("DESC");
+            const operator = isDesc ? "<" : ">";
+
+            conditions.push({ column, operator, value });
+        }
+
+        // Build composite keyset condition: (c1 > v1) OR (c1 = v1 AND c2 > v2) OR ...
+        // For single column: simply c1 > v1
+        if (conditions.length === 1) {
+            const { column, operator, value } = conditions[0];
+            this._wheres.push({
+                connector: "AND",
+                column,
+                operator,
+                value,
+            });
+        } else {
+            // Composite: build OR of AND groups
+            const parts: string[] = [];
+            const paramValues: unknown[] = [];
+
+            for (let i = 0; i < conditions.length; i++) {
+                const andParts: string[] = [];
+                // All previous columns must be equal
+                for (let j = 0; j < i; j++) {
+                    const prev = conditions[j];
+                    paramValues.push(prev.value);
+                    andParts.push(`${quoteIdent(prev.column)} = $${paramValues.length}`);
+                }
+                // Current column uses > or <
+                const curr = conditions[i];
+                paramValues.push(curr.value);
+                andParts.push(`${quoteIdent(curr.column)} ${curr.operator} $${paramValues.length}`);
+                parts.push(`(${andParts.join(" AND ")})`);
+            }
+
+            const text = parts.join(" OR ");
+            this._wheres.push({
+                connector: "AND",
+                text,
+                values: paramValues,
+            });
+        }
+
+        return this;
+    }
+
     // ==================== JSON Operators Support ====================
 
     /**
@@ -717,6 +840,33 @@ export class QueryBuilder implements QueryBuilderType {
     timeout(ms: number): this {
         // This will be handled by the query execution layer
         this.withQueryContext({ timeout: ms });
+        return this;
+    }
+
+    // ==================== Query Execution Plan (EXPLAIN) ====================
+
+    /**
+     * Prefix the compiled query with `EXPLAIN` to inspect its execution plan.
+     *
+     * @example
+     * const { text, values } = db.select().from('users').where({ id: 1 }).explain().toSQL();
+     * // text => "EXPLAIN SELECT * FROM \"users\" WHERE \"id\" = $1"
+     *
+     * @example
+     * const { text } = db.select().from('users').explain({ analyze: true, buffers: true, format: 'json' }).toSQL();
+     * // text => "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM \"users\""
+     */
+    explain(options: {
+        analyze?: boolean;
+        verbose?: boolean;
+        buffers?: boolean;
+        costs?: boolean;
+        timing?: boolean;
+        summary?: boolean;
+        settings?: boolean;
+        format?: "text" | "json" | "xml" | "yaml";
+    } = {}): this {
+        this._explainOptions = options;
         return this;
     }
 
@@ -1403,14 +1553,23 @@ export class QueryBuilder implements QueryBuilderType {
             const combinedSql = builder._compileCombinedQueries();
             const ctesSql = builder._compileCTEs();
             
+            let text = `${ctesSql}${mainSql}${combinedSql}`;
+            if (builder._explainOptions) {
+                const explainPrefix = _compileExplainOptions(builder._explainOptions);
+                text = explainPrefix ? `EXPLAIN ${explainPrefix} ${text}` : `EXPLAIN ${text}`;
+            }
             return { 
-                text: `${ctesSql}${mainSql}${combinedSql}`, 
+                text, 
                 values: builder._params.values 
             };
         }
         
         // Normal query
-        const text = builder._compile();
+        let text = builder._compile();
+        if (builder._explainOptions) {
+            const explainPrefix = _compileExplainOptions(builder._explainOptions);
+            text = explainPrefix ? `EXPLAIN ${explainPrefix} ${text}` : `EXPLAIN ${text}`;
+        }
         return { text, values: builder._params.values };
     }
 
@@ -1466,8 +1625,45 @@ export class QueryBuilder implements QueryBuilderType {
             mergedOptions.timeout = this._queryLoggingContext.timeout;
         }
         
-        const result = await runner(text, values, mergedOptions);
-        return result ?? { rows: [], command: "", rowCount: 0, oid: 0, fields: [] };
+        // Support AbortSignal for query cancellation
+        const signal = mergedOptions.signal as AbortSignal | undefined;
+        if (signal?.aborted) {
+            throw new DOMException("The operation was aborted.", "AbortError");
+        }
+
+        const result = await new Promise<QueryResult>((resolve, reject) => {
+            let settled = false;
+            const abortHandler = () => {
+                if (!settled) {
+                    settled = true;
+                    reject(new DOMException("The operation was aborted.", "AbortError"));
+                }
+            };
+            if (signal) {
+                signal.addEventListener("abort", abortHandler, { once: true });
+            }
+            runner(text, values, mergedOptions).then(
+                (result) => {
+                    if (signal) {
+                        signal.removeEventListener("abort", abortHandler);
+                    }
+                    if (!settled) {
+                        settled = true;
+                        resolve(result ?? { rows: [], command: "", rowCount: 0, oid: 0, fields: [] });
+                    }
+                },
+                (error) => {
+                    if (signal) {
+                        signal.removeEventListener("abort", abortHandler);
+                    }
+                    if (!settled) {
+                        settled = true;
+                        reject(error);
+                    }
+                },
+            );
+        });
+        return result;
     }
 
     async first(queryOptions: Record<string, unknown> = {}): Promise<QueryResultRow | null> {

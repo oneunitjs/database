@@ -462,7 +462,9 @@ describe("retry edge cases", () => {
 describe("batch edge cases", () => {
     it("empty rows returns empty array", async () => {
         const batch = createBatch({ query: async () => ({ rows: [], rowCount: 0 }) });
-        expect(await batch.insertMany("users", [])).toEqual([]);
+        const result = await batch.insertMany("users", []);
+        expect(result.rows).toEqual([]);
+        expect(result.rowCount).toBe(0);
         await expect(batch.insertMany("users", [{}])).rejects.toThrow(/at least one column/);
     });
 
@@ -474,8 +476,8 @@ describe("batch edge cases", () => {
                 return { rows: [], rowCount: params.length };
             },
         });
-        const count = await batch.insertMany("tags", [{ name: "a" }, { name: "b" }, { name: "c" }]);
-        expect(count).toBe(3);
+        const result = await batch.insertMany("tags", [{ name: "a" }, { name: "b" }, { name: "c" }]);
+        expect(result.rowCount).toBe(3);
         expect(calls.length).toBe(1);
         expect(calls[0].params).toEqual(["a", "b", "c"]);
     });
@@ -509,8 +511,8 @@ describe("batch edge cases", () => {
 
     it("onConflict true emits DO NOTHING", async () => {
         const batch = createBatch({ query: async () => ({ rows: [], rowCount: 0 }) });
-        const n = await batch.insertMany("users", [{ id: 1 }], { onConflict: true });
-        expect(n).toBe(1);
+        const result = await batch.insertMany("users", [{ id: 1 }], { onConflict: true });
+        expect(result.rowCount).toBe(1);
     });
 
     it("onConflict with constraint name", async () => {
@@ -535,12 +537,12 @@ describe("batch edge cases", () => {
                 return { rows: collected.slice(-params.length), rowCount: params.length };
             },
         });
-        const rows = await batch.insertMany("users", [{ a: 1 }, { a: 2 }, { a: 3 }], {
+        const result = await batch.insertMany("users", [{ a: 1 }, { a: 2 }, { a: 3 }], {
             returning: ["id"],
             chunkSize: 2,
         });
-        expect(rows.length).toBe(3);
-        expect(rows.map((r) => r.id)).toEqual([1, 2, 3]);
+        expect(result.rows.length).toBe(3);
+        expect(result.rows.map((r) => r.id)).toEqual([1, 2, 3]);
     });
 
     it("insertMany inside transaction uses provided client", async () => {
@@ -555,8 +557,8 @@ describe("batch edge cases", () => {
                 return callback(client);
             },
         });
-        const count = await batch.insertMany("users", [{ a: 1 }, { a: 2 }], { transaction: true });
-        expect(count).toBe(2);
+        const result = await batch.insertMany("users", [{ a: 1 }, { a: 2 }], { transaction: true });
+        expect(result.rowCount).toBe(2);
         expect(clientUsed).not.toBeNull();
     });
 });
@@ -906,7 +908,10 @@ describe("migrator edge cases", () => {
     it("empty migrations list applies nothing", async () => {
         const client = {
             released: false,
-            async query() {
+            async query(text = "") {
+                if (String(text).startsWith("SELECT pg_try_advisory_lock")) {
+                    return { rows: [{ pg_try_advisory_lock: true }] };
+                }
                 return { rows: [] };
             },
             release() { this.released = true; },
@@ -917,7 +922,7 @@ describe("migrator edge cases", () => {
         expect(client.released).toBe(true);
     });
 
-    it("duplicate migration IDs are applied once each occurrence", async () => {
+    it("duplicate migration IDs are rejected", async () => {
         const state = { applied: [], executed: [] };
         const client = {
             released: false,
@@ -925,7 +930,7 @@ describe("migrator edge cases", () => {
                 const sqlText = String(text).trim();
                 if (sqlText.startsWith("SELECT pg_advisory_lock") || sqlText.startsWith("SELECT pg_advisory_unlock")) return {};
                 if (sqlText.includes("CREATE TABLE IF NOT EXISTS")) return {};
-                if (sqlText.includes("SELECT id, name, checksum, applied_at")) return { rows: state.applied.map((r) => ({ ...r })) };
+                if (sqlText.includes("_writer_migrations") && /^\s*SELECT/i.test(sqlText)) return { rows: state.applied.map((r) => ({ ...r, status: r.status ?? "applied" })) };
                 if (sqlText.includes("INSERT INTO") && sqlText.includes("_writer_migrations")) {
                     state.applied.push({ id: values[0], name: values[1], checksum: values[2], applied_at: new Date().toISOString() });
                     return {};
@@ -939,12 +944,9 @@ describe("migrator edge cases", () => {
         const migrator = createMigrator({ connect: async () => client });
         const migrations = [
             { id: "001", name: "one", up: "CREATE TABLE t (id int)", down: "DROP TABLE t" },
-            { id: "001", name: "one again", up: "ALTER TABLE t ADD COLUMN x int", down: "ALTER TABLE t DROP COLUMN x" },
+            { id: "001", name: "one again", up: "ALTER TABLE t ADD COLUMN x int", down: "ALTER TABLE t DROP COLUMN x" }, // same id, different SQL -> rejected
         ];
-        const applied = await migrator.run({ migrations });
-        expect(applied).toEqual(["001", "001"]);
-        expect(state.applied.length).toBe(2);
-        expect(state.executed.length).toBe(2);
+        await expect(migrator.run({ migrations })).rejects.toThrow(/Duplicate migration id/i);
     });
 
     it("status reports pending as applied=false", async () => {
@@ -962,7 +964,7 @@ describe("migrator edge cases", () => {
         const status = await migrator.status({ migrations });
         expect(status.length).toBe(1);
         expect(status[0].applied).toBe(false);
-        expect(status[0].appliedAt).toBeNull();
+        expect(status[0].applied_at).toBeNull();
     });
 });
 
@@ -976,7 +978,7 @@ describe("schema manager edge cases", () => {
         };
         const manager = createSchemaManager(pool);
         await manager.drop.table("users", { cascade: true });
-        expect(queries[0]).toMatch(/DROP TABLE IF EXISTS users/);
+        expect(queries[0]).toMatch(/DROP TABLE IF EXISTS.*users/);
         expect(queries[0]).toMatch(/CASCADE/);
     });
 
@@ -989,8 +991,8 @@ describe("schema manager edge cases", () => {
         };
         const manager = createSchemaManager(pool);
         await manager.alter.addColumns("users", { age: "INTEGER" });
-        expect(queries[0]).toMatch(/ALTER TABLE users/);
-        expect(queries[0]).toMatch(/ADD COLUMN age INTEGER/);
+        expect(queries[0]).toMatch(/ALTER TABLE.*users/);
+        expect(queries[0]).toMatch(/ADD COLUMN.*"age" INTEGER/);
     });
 });
 
@@ -1071,11 +1073,11 @@ describe("real world scenarios", () => {
                 return { rows: [], rowCount: params.length / 2 };
             },
         });
-        const count = await batch.insertMany("audit_log", Array.from({ length: 1200 }, (_, i) => ({ event: "login", user_id: i })), {
+        const result = await batch.insertMany("audit_log", Array.from({ length: 1200 }, (_, i) => ({ event: "login", user_id: i })), {
             chunkSize: 500,
             onConflict: true,
         });
-        expect(count).toBe(1200);
+        expect(result.rowCount).toBe(1200);
         expect(calls.length).toBe(3);
         calls.forEach((c) => expect(c.text).toMatch(/ON CONFLICT DO NOTHING/));
     });

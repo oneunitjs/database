@@ -1,7 +1,33 @@
-import type { Pool, PoolClient, QueryResultRow, Submittable } from "pg";
+import type { Pool, QueryResultRow, Submittable } from "pg";
 import type { CursorApi, CursorHandle } from "../types.js";
 import { isConnectionError } from "./errors.js";
-import Cursor from "pg-cursor";
+
+type CursorConstructor = new (text: string, values?: unknown[], options?: Record<string, unknown>) => Submittable;
+
+let cursorCtor: CursorConstructor | undefined;
+let cursorLoad: Promise<CursorConstructor> | undefined;
+
+async function loadCursor(): Promise<CursorConstructor> {
+    if (cursorCtor) {
+        return cursorCtor;
+    }
+    if (!cursorLoad) {
+        cursorLoad = import("pg-cursor")
+            .then((mod) => {
+                const ctor = (mod as unknown as { default?: CursorConstructor }).default ?? (mod as unknown as CursorConstructor);
+                cursorCtor = ctor;
+                return ctor;
+            })
+            .catch((error: unknown) => {
+                cursorLoad = undefined;
+                throw new Error(
+                    'Cursors require the optional "pg-cursor" peer dependency. Install it with: npm install pg-cursor',
+                    { cause: error instanceof Error ? error : undefined },
+                );
+            });
+    }
+    return cursorLoad;
+}
 
 interface CursorInstance {
     read(count: number, callback: (error: Error | null, rows: QueryResultRow[]) => void): void;
@@ -11,7 +37,12 @@ interface CursorInstance {
 type PoolResolver = (shardKey?: string, shardId?: string) => Pool;
 
 export function createCursor(pool: Pool, resolvePool?: PoolResolver): CursorApi {
-    async function cursor(text: string, values: unknown[] = [], options: Record<string, unknown> = {}): Promise<CursorHandle> {
+    async function cursor(
+        text: string,
+        values: unknown[] = [],
+        options: Record<string, unknown> = {},
+    ): Promise<CursorHandle> {
+        const Cursor = await loadCursor();
         const targetPool = resolvePool
             ? resolvePool(options.shardKey as string | undefined, options.shardId as string | undefined)
             : pool;
@@ -19,9 +50,9 @@ export function createCursor(pool: Pool, resolvePool?: PoolResolver): CursorApi 
         let instance: CursorInstance;
 
         try {
-            const cursor = new Cursor(text, values, options);
-            const queryResult = client.query(cursor as unknown as Submittable);
-            
+            const cursorInstance = new Cursor(text, values, options);
+            const queryResult = client.query(cursorInstance as unknown as Submittable);
+
             // Handle both Promise and direct return
             if (queryResult && typeof (queryResult as { then?: unknown }).then === "function") {
                 instance = await queryResult as unknown as CursorInstance;
@@ -39,7 +70,17 @@ export function createCursor(pool: Pool, resolvePool?: PoolResolver): CursorApi 
         // Track cursor creation time for leak detection
         const createdAt = Date.now();
         const CURSOR_TIMEOUT = 300000; // 5 minutes
-        
+
+        // Configurable batch size for read/iterate operations
+        const defaultBatchSize = (options.batchSize as number | undefined) ?? 100;
+
+        // Progress reporting
+        const onProgress = options.onProgress as
+            | ((info: { rows: number; elapsedMs: number }) => void)
+            | undefined;
+        let rowsRead = 0;
+        const startTime = Date.now();
+
         // Set timeout to warn about long-running cursors
         const cursorTimeout = setTimeout(() => {
             console.warn(
@@ -84,12 +125,17 @@ export function createCursor(pool: Pool, resolvePool?: PoolResolver): CursorApi 
             });
         }
 
-        async function read(count = 100): Promise<QueryResultRow[]> {
+        // Cancel the cursor — close it and release the connection.
+        async function cancel(): Promise<void> {
+            await close();
+        }
+
+        async function read(count = defaultBatchSize): Promise<QueryResultRow[]> {
             return new Promise((resolve, reject) => {
                 const readTimeout = setTimeout(() => {
-                    reject(new Error('Cursor read timed out'));
+                    reject(new Error("Cursor read timed out"));
                 }, 30000); // 30 seconds timeout
-                
+
                 instance.read(count, (error, rows) => {
                     clearTimeout(readTimeout);
                     if (error) {
@@ -98,12 +144,20 @@ export function createCursor(pool: Pool, resolvePool?: PoolResolver): CursorApi 
                         return;
                     }
 
+                    if (rows && onProgress) {
+                        rowsRead += rows.length;
+                        onProgress({
+                            rows: rowsRead,
+                            elapsedMs: Date.now() - startTime,
+                        });
+                    }
+
                     resolve(rows);
                 });
             });
         }
 
-        async function* iterate(batchSize = 100): AsyncGenerator<QueryResultRow, void, unknown> {
+        async function* iterate(batchSize = defaultBatchSize): AsyncGenerator<QueryResultRow, void, unknown> {
             try {
                 for (;;) {
                     const rows = await read(batchSize);
@@ -125,6 +179,7 @@ export function createCursor(pool: Pool, resolvePool?: PoolResolver): CursorApi 
         return {
             read,
             close,
+            cancel,
             [Symbol.asyncIterator]() {
                 return iterate();
             },

@@ -23,10 +23,13 @@ import type {
     ReplicationHealthResult,
     PreparedStatement,
     InsertManyOptions,
+    ShardStrategy,
+    ShardRoutingDiagnostics,
 } from "./types.js";
 import type { PoolConfig } from "pg";
 import { ShardExecutor } from "./sharding/shard-executor.js";
 import { createShardMetrics } from "./sharding/shard-metrics.js";
+import { ShardRebalanceTracker } from "./sharding/shard-rebalance-tracker.js";
 import { createPool } from "./client/pool.js";
 import { createClient } from "./client/client.js";
 import { createTransaction } from "./client/transaction.js";
@@ -279,6 +282,7 @@ function buildShardingApi(
     shardExecutor?: ShardExecutor,
     shardMetrics?: ReturnType<typeof createShardMetrics>,
     batch?: ReturnType<typeof createBatch>,
+    rebalanceTracker?: ShardRebalanceTracker,
 ): ShardingApi {
     const enabled = !!manager && !!router;
     const migrate = manager ? new ShardMigrationTracker(manager) : undefined;
@@ -1008,6 +1012,18 @@ function buildShardingApi(
                 consecutiveFailures: shard?.consecutiveFailures ?? 0,
             };
         },
+        getRoutingDiagnostics() {
+            if (!router) {
+                return {
+                    recent: [],
+                    totalRoutes: 0,
+                    byStrategy: {},
+                    byShard: {},
+                    clear: () => {},
+                } as unknown as ShardRoutingDiagnostics;
+            }
+            return router.getDiagnostics();
+        },
         query,
         transaction,
         distributedTransaction: distributedTransactionFn,
@@ -1021,6 +1037,7 @@ function buildShardingApi(
         queryAllShards: queryAllShardsApi,
         topology: topologyApi,
         metrics: shardMetrics,
+        rebalanceTracker: rebalanceTracker!,
         executeOnShard: executeOnShardApi,
         migrate: migrate ?? undefined,
         get distributedTx() {
@@ -1049,6 +1066,10 @@ export function createDatabase({
     // Per-shard metrics collector — tracks query counts, errors, latency, and
     // routing decisions per shard. Bounded-cardinality labels (shardId only).
     const shardMetrics = createShardMetrics();
+
+    // Rebalance progress tracking primitives — tracks in-flight shard
+    // rebalance operations (copying, validating, cutting over).
+    const rebalanceTracker = new ShardRebalanceTracker();
 
     // Validate sharding configuration early, before any pools are created.
     if (sharding) {
@@ -1101,6 +1122,7 @@ export function createDatabase({
             manager: ShardManager;
             enabled: boolean;
             strategy?: ShardStrategyName;
+            strategyInstance?: ShardStrategy;
             defaultShardId?: string;
             directory?: Record<string, string>;
             virtualNodes?: number;
@@ -1118,6 +1140,7 @@ export function createDatabase({
             manager,
             enabled: true,
             strategy: shardingConfig.strategy,
+            strategyInstance: shardingConfig.strategyInstance,
             defaultShardId: shardingConfig.defaultShardId,
         };
 
@@ -1166,27 +1189,32 @@ export function createDatabase({
 
         switch (shardingConfig.strategy) {
             case "consistent-hash": {
+                if (shardingConfig.strategyInstance) break;
                 const cc = shardingConfig as Extract<ShardingConfig, { strategy: "consistent-hash" }>;
                 routerOptions.virtualNodes = cc.virtualNodes;
                 break;
             }
             case "rendezvous": {
+                if (shardingConfig.strategyInstance) break;
                 const rc = shardingConfig as Extract<ShardingConfig, { strategy: "rendezvous" }>;
                 routerOptions.hashSeed = rc.hashSeed;
                 break;
             }
             case "range": {
+                if (shardingConfig.strategyInstance) break;
                 const rc = shardingConfig as Extract<ShardingConfig, { strategy: "range" }>;
                 routerOptions.ranges = rc.ranges;
                 break;
             }
             case "directory": {
+                if (shardingConfig.strategyInstance) break;
                 const dc = shardingConfig as Extract<ShardingConfig, { strategy: "directory" }>;
                 routerOptions.directory = dc.directory;
                 routerOptions.unknownKeyPolicy = dc.unknownKeyPolicy;
                 break;
             }
             case "tenant": {
+                if (shardingConfig.strategyInstance) break;
                 const tc = shardingConfig as Extract<ShardingConfig, { strategy: "tenant" }>;
                 routerOptions.tenants = tc.tenants;
                 routerOptions.defaultShardId = tc.defaultTenantShardId ?? shardingConfig.defaultShardId;
@@ -1195,6 +1223,7 @@ export function createDatabase({
             case "composite":
                 break;
             case "geographic": {
+                if (shardingConfig.strategyInstance) break;
                 const gc = shardingConfig as Extract<ShardingConfig, { strategy: "geographic" }>;
                 routerOptions.regions = gc.regions;
                 routerOptions.defaultRegion = gc.defaultRegion;
@@ -1202,6 +1231,7 @@ export function createDatabase({
                 break;
             }
             case "weighted": {
+                if (shardingConfig.strategyInstance) break;
                 const wc = shardingConfig as Extract<ShardingConfig, { strategy: "weighted" }>;
                 routerOptions.weights = Object.fromEntries(
                     wc.shards.map((s) => [s.id, s.weight]),
@@ -1807,6 +1837,7 @@ export function createDatabase({
         shardExecutor,
         shardMetrics,
         batchApi,
+        rebalanceTracker,
     );
 
     function buildReplicationApi(): ReplicationApi {
@@ -1958,6 +1989,9 @@ export function createDatabase({
         // health & lifecycle
         ...createCheck(primary),
         shutdown: combinedShutdown,
+        get isClosed(): boolean {
+            return manager?.isClosed ?? shutdownSystem.isClosed;
+        },
 
         // bulk operations
         batch: batchApi,

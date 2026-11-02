@@ -6,6 +6,8 @@ export { ShardRouter } from "./shard-router.js";
 export type { ShardRouterOptions, ShardRange } from "./shard-router.js";
 export { ShardMigrationTracker } from "./shard-migration.js";
 export type { ShardMigrationTracker as ShardMigrationTrackerType } from "./shard-migration.js";
+export { ShardRebalanceTracker } from "./shard-rebalance-tracker.js";
+export type { ShardRebalanceTracker as ShardRebalanceTrackerType } from "./shard-rebalance-tracker.js";
 export { ShardExecutor } from "./shard-executor.js";
 export { createShardMetrics } from "./shard-metrics.js";
 export type { ShardMetricsSnapshot } from "./shard-metrics.js";
@@ -57,5 +59,6 @@ export {
     GeographicShardStrategy,
     WeightedShardStrategy,
     createShardStrategy,
+    registerShardStrategy,
     getRegisteredStrategyNames,
 } from "./strategies.js";

@@ -44,7 +44,7 @@ function extendedPoolStats(pool: Pool | undefined): {
 }
 
 export function createCheck(pool: Pool): CheckApi {
-    async function check(options: { timeout?: number } = {}): Promise<{
+    async function check(options: { timeout?: number; validationQuery?: string } = {}): Promise<{
         status: "up" | "down";
         latency: { value: number; unit: "ms" };
         pool?: { 
@@ -58,9 +58,10 @@ export function createCheck(pool: Pool): CheckApi {
         code?: string;
     }> {
         const start = performance.now();
+        const validationQuery = options.validationQuery ?? "SELECT 1";
 
         try {
-            await pool.query("SELECT 1");
+            await pool.query(validationQuery);
 
             return {
                 status: "up",
@@ -88,7 +89,7 @@ export function createCheck(pool: Pool): CheckApi {
      * Richer health payload suitable for readiness endpoints. Always resolves;
      * it never throws so callers can report `down` without extra try/catch.
      */
-    async function health(options: { timeout?: number } = {}): Promise<{
+    async function health(options: { timeout?: number; validationQuery?: string } = {}): Promise<{
         status: "up" | "down";
         healthy: boolean;
         checkedAt: string;

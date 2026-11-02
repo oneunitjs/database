@@ -1,6 +1,8 @@
 import type { Pool, PoolClient, QueryResult, QueryResultRow, PoolConfig, QueryConfig } from "pg";
 import type { Readable } from "node:stream";
-import { FRAGMENT } from "./query/sql.js";
+import type { DatabaseError, TimeoutError } from "./client/errors.js";
+
+export type { DatabaseError, TimeoutError };
 
 export type { Pool, PoolClient, QueryResult, QueryResultRow };
 export type Logger = {
@@ -31,7 +33,8 @@ export type ShardStrategyName =
     | "tenant"
     | "composite"
     | "geographic"
-    | "weighted";
+    | "weighted"
+    | (string & {});
 
 export interface ShardConfig {
     id: string;
@@ -106,6 +109,12 @@ export interface ReshardingHooks {
 export interface BaseShardingConfig {
     enabled: boolean;
     defaultShardId?: string;
+    /**
+     * Custom strategy instance for pluggable shard selection. When set,
+     * takes precedence over `strategy` name lookup. The strategy's `name`
+     * is used for routing diagnostics and validation.
+     */
+    strategyInstance?: ShardStrategy;
     /**
      * Current routing version. Increments on every shard map change.
      * Used by strategies and clients to detect when routing tables are stale.
@@ -382,6 +391,69 @@ export interface ShardStrategyRegistryEntry {
     name: ShardStrategyName;
     strategy: ShardStrategy;
     configShape: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Custom strategy registration
+// ---------------------------------------------------------------------------
+
+export interface CustomShardStrategyRegistration {
+    name: string;
+    strategy: ShardStrategy;
+    configShape?: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Shard routing diagnostics
+// ---------------------------------------------------------------------------
+
+export interface ShardRoutingDiagnostic {
+    shardKey: string;
+    selectedShardId: string;
+    strategy: ShardStrategyName;
+    strategyVersion: number;
+    routingPath: string[];
+    metadata: Record<string, unknown>;
+    timestamp: string;
+}
+
+export interface ShardRoutingDiagnostics {
+    recent: ShardRoutingDiagnostic[];
+    totalRoutes: number;
+    byStrategy: Record<ShardStrategyName, number>;
+    byShard: Record<string, number>;
+    clear(): void;
+}
+
+// ---------------------------------------------------------------------------
+// Rebalance progress tracking
+// ---------------------------------------------------------------------------
+
+export interface ShardRebalanceProgress {
+    rebalanceId: string;
+    sourceShardId: string;
+    destinationShardId: string;
+    totalKeys: number;
+    movedKeys: number;
+    failedKeys: number;
+    skippedKeys: number;
+    percentage: number;
+    status: "planning" | "copying" | "validating" | "cutting-over" | "completed" | "failed" | "cancelled";
+    startedAt: string;
+    updatedAt: string;
+    estimatedCompletionAt?: string;
+    errors: string[];
+}
+
+export interface ShardRebalanceTracker {
+    createRebalance(sourceShardId: string, destinationShardId: string, totalKeys: number): ShardRebalanceProgress;
+    updateProgress(rebalanceId: string, update: Partial<ShardRebalanceProgress>): ShardRebalanceProgress | undefined;
+    getRebalance(rebalanceId: string): ShardRebalanceProgress | undefined;
+    listRebalances(): ShardRebalanceProgress[];
+    completeRebalance(rebalanceId: string): ShardRebalanceProgress | undefined;
+    failRebalance(rebalanceId: string, error: string): ShardRebalanceProgress | undefined;
+    cancelRebalance(rebalanceId: string): ShardRebalanceProgress | undefined;
+    clearCompleted(): number;
 }
 
 export interface ShardInfo {
@@ -688,6 +760,19 @@ export interface ShardingApi {
      * `distributedTransaction` is configured and initialized.
      */
     readonly distributedTx?: import("./distributed-tx/distributed-transaction-coordinator.js").DistributedTransactionCoordinator;
+
+    /**
+     * Routing diagnostics — recent shard routing decisions, totals, and
+     * per-strategy / per-shard counts. Useful for debugging routing
+     * distribution and detecting hot shards.
+     */
+    getRoutingDiagnostics(): ShardRoutingDiagnostics;
+
+    /**
+     * Rebalance progress tracking primitives — create, update, and query
+     * in-flight shard rebalance operations.
+     */
+    readonly rebalanceTracker: ShardRebalanceTracker;
 }
 
 export interface DatabaseConfig extends PoolConfig {
@@ -747,6 +832,8 @@ export interface QueryOptions {
     timeout?: number;
     retry?: boolean | number | RetryOptions;
     destroyOnError?: boolean;
+    cancel?: boolean;
+    signal?: AbortSignal;
     values?: unknown[];
     /**
      * Read preference for replication routing.
@@ -795,16 +882,40 @@ export interface InstrumentationOptions {
 export type QueryRunner = (text: string | QueryConfig, values?: unknown[], options?: QueryOptions) => Promise<QueryResult>;
 
 export interface SqlFragment {
-    [FRAGMENT]?: true;
-    text: string;
-    values: unknown[];
+    readonly text: string;
+    readonly values: unknown[];
 }
 
 export type QueryFragment = SqlFragment;
 
 export type QueryLike = string | SqlFragment | SqlFragment[] | Record<string, unknown> | unknown[];
 
-export type SqlFn = (strings: TemplateStringsArray, ...values: QueryLike[]) => SqlFragment;
+export type SqlFn = ((strings: TemplateStringsArray, ...values: QueryLike[]) => SqlFragment) & {
+    raw(text: string): SqlFragment;
+    identifier(name: string): SqlFragment;
+    quoteIdent(name: string): string;
+    quoteIdentList(names: string | string[]): string;
+    isFragment(value: unknown): value is SqlFragment;
+    join: JoinFn;
+    rowNumber(partitionBy?: string[], orderBy?: string[]): SqlFragment;
+    rank(partitionBy?: string[], orderBy?: string[]): SqlFragment;
+    denseRank(partitionBy?: string[], orderBy?: string[]): SqlFragment;
+    window(name: string, options?: { partitionBy?: string[]; orderBy?: string[] }): SqlFragment;
+    jsonGetText(column: string, path: string): SqlFragment;
+    jsonGet(column: string, path: string): SqlFragment;
+    jsonContains(column: string, value: unknown): SqlFragment;
+    jsonContained(column: string, value: unknown): SqlFragment;
+    jsonArrayLength(column: string): SqlFragment;
+    jsonObjectKeys(column: string): SqlFragment;
+    jsonPath(column: string, path: string): SqlFragment;
+    quoteString(value: string): string;
+    caseWhen(conditions: Array<{ when: string | SqlFragment; then: unknown }>, elseValue?: unknown): SqlFragment;
+    countDistinct(column: string): SqlFragment;
+    stringAgg(column: string, delimiter: string): SqlFragment;
+    arrayAgg(column: string): SqlFragment;
+    jsonAgg(column: string): SqlFragment;
+    jsonObjectAgg(key: string, value: string): SqlFragment;
+};
 
 export type JoinFn = (values: QueryLike | QueryLike[], separator?: string) => SqlFragment;
 
@@ -866,6 +977,8 @@ export interface PreparedStatement {
 export interface CursorHandle {
     read(count?: number): Promise<QueryResultRow[]>;
     close(error?: unknown): Promise<void>;
+    /** Cancel and close the cursor, releasing the connection. */
+    cancel(): Promise<void>;
     [Symbol.asyncIterator](): AsyncIterator<QueryResultRow>;
 }
 
@@ -889,21 +1002,78 @@ export interface InsertManyOptions {
     transaction?: boolean;
     client?: Pick<PoolClient, "query">;
     queryOptions?: QueryOptions;
+    retry?: boolean | number | RetryOptions;
+    signal?: AbortSignal;
+    timeout?: number;
+    onRowError?: (row: Record<string, unknown>, error: unknown, rowIndex: number) => void;
+    savepoint?: boolean;
+    onProgress?: (progress: BatchProgressEvent) => void;
+    adaptive?: boolean;
+}
+
+export interface BatchProgressEvent {
+    operation: "insert" | "update" | "delete" | "select" | "executeBatch";
+    chunkIndex: number;
+    totalChunks: number;
+    rowsProcessed: number;
+    rowsSucceeded: number;
+    rowsFailed: number;
+    durationMs: number;
+}
+
+export interface BatchRowError {
+    rowIndex: number;
+    row: Record<string, unknown>;
+    error: unknown;
+}
+
+export interface BatchStats {
+    chunks: number;
+    rowsProcessed: number;
+    rowsSucceeded: number;
+    rowsFailed: number;
+    durationMs: number;
+    errors: BatchRowError[];
+}
+
+export interface BatchInsertResult {
+    rows: unknown[];
+    rowCount: number;
+    stats: BatchStats;
+}
+
+export interface BatchUpdateDeleteResult {
+    rows: unknown[];
+    rowCount: number;
+    stats: BatchStats;
+}
+
+export interface BatchSelectResult {
+    rows: unknown[];
+    rowCount: number;
+    stats: BatchStats;
 }
 
 export interface BatchApi {
-    insertMany(table: string, rows: Record<string, unknown>[], options?: InsertManyOptions): Promise<unknown>;
+    insertMany(table: string, rows: Record<string, unknown>[], options?: InsertManyOptions): Promise<BatchInsertResult>;
     selectMany(
-        builderOrSql: any, // QueryBuilder | { text: string; values: unknown[] } | string
+        builderOrSql: any,
         options?: {
             chunkSize?: number;
             queryOptions?: QueryOptions;
             shardKey?: string;
             shardId?: string;
-            client?: any; // PoolClient
+            client?: any;
             onChunk?: (rows: unknown[]) => Promise<void> | void;
+            keysetColumn?: string;
+            lastKeysetValue?: unknown;
+            retry?: boolean | number | RetryOptions;
+            signal?: AbortSignal;
+            timeout?: number;
+            onProgress?: (progress: BatchProgressEvent) => void;
+            adaptive?: boolean;
         }
-    ): Promise<unknown[]>;
+    ): Promise<BatchSelectResult>;
     updateMany(
         table: string,
         values: Record<string, unknown>,
@@ -914,9 +1084,17 @@ export interface BatchApi {
             queryOptions?: QueryOptions;
             shardKey?: string;
             shardId?: string;
-            client?: any; // PoolClient
+            client?: any;
+            transaction?: boolean;
+            retry?: boolean | number | RetryOptions;
+            signal?: AbortSignal;
+            timeout?: number;
+            onRowError?: (row: Record<string, unknown>, error: unknown, rowIndex: number) => void;
+            savepoint?: boolean;
+            onProgress?: (progress: BatchProgressEvent) => void;
+            adaptive?: boolean;
         }
-    ): Promise<unknown[]>;
+    ): Promise<BatchUpdateDeleteResult>;
     deleteMany(
         table: string,
         whereConditions: { column: string; operator: string; values: unknown[] }[],
@@ -926,17 +1104,30 @@ export interface BatchApi {
             queryOptions?: QueryOptions;
             shardKey?: string;
             shardId?: string;
-            client?: any; // PoolClient
+            client?: any;
+            transaction?: boolean;
+            retry?: boolean | number | RetryOptions;
+            signal?: AbortSignal;
+            timeout?: number;
+            onRowError?: (row: Record<string, unknown>, error: unknown, rowIndex: number) => void;
+            savepoint?: boolean;
+            onProgress?: (progress: BatchProgressEvent) => void;
+            adaptive?: boolean;
         }
-    ): Promise<unknown[]>;
+    ): Promise<BatchUpdateDeleteResult>;
     executeBatch(
-        builders: any[], // QueryBuilder[]
+        builders: any[],
         options?: {
             chunkSize?: number;
             transaction?: boolean;
             queryOptions?: QueryOptions;
             shardKey?: string;
             shardId?: string;
+            retry?: boolean | number | RetryOptions;
+            signal?: AbortSignal;
+            timeout?: number;
+            onProgress?: (progress: BatchProgressEvent) => void;
+            adaptive?: boolean;
         }
     ): Promise<QueryResult[]>;
 }
@@ -1030,11 +1221,26 @@ export interface QueryBuilder {
     withQueryContext(context: Record<string, unknown>): QueryBuilder;
     getQueryContext(): Record<string, unknown>;
     timeout(ms: number): QueryBuilder;
+
+    // Execution plan inspection
+    explain(options?: {
+        analyze?: boolean;
+        verbose?: boolean;
+        buffers?: boolean;
+        costs?: boolean;
+        timing?: boolean;
+        summary?: boolean;
+        settings?: boolean;
+        format?: "text" | "json" | "xml" | "yaml";
+    }): QueryBuilder;
     
     // Sharding
     withShard(shardKey: string): QueryBuilder;
     withShardId(shardId: string): QueryBuilder;
-    
+
+    // Keyset pagination
+    keysetPagination(lastValues: Record<string, unknown>): QueryBuilder;
+
     // Execution
     toSQL(): { text: string; values: unknown[] };
     execute(options?: QueryOptions): Promise<QueryResult>;
@@ -1061,6 +1267,22 @@ export interface ModelFindOptions extends QueryOptions {
      * single auto-committed query.
      */
     atomic?: boolean;
+    /**
+     * Override the model-level default scope for this call.
+     * Pass `false` to disable the default scope entirely.
+     * Pass a WHERE object to merge with / override the model default scope.
+     */
+    defaultScope?: Record<string, unknown> | boolean;
+    /**
+     * Optional cache hooks for query result caching.
+     * `get(key)` returns cached rows or undefined/None to miss.
+     * `set(key, rows)` stores rows for subsequent calls.
+     * Works with find, findOne, findById, count, exists.
+     */
+    cache?: {
+        get(key: string): unknown[] | null | undefined | Promise<unknown[] | null | undefined>;
+        set(key: string, rows: unknown[]): void | Promise<void>;
+    };
 }
 
 /**
@@ -1184,6 +1406,48 @@ export interface ModelOptions<T extends QueryResultRow = QueryResultRow> {
      * Only applies when coerce is true.
      */
     coerceTypes?: Record<string, 'string' | 'number' | 'boolean' | 'date'>;
+    /**
+     * Default scope applied to all queries (find, findOne, findById, count, exists).
+     * Can be a static WHERE object or a function returning one. Useful for
+     * multi-tenancy (e.g. { tenant_id: currentTenant }) or soft-delete-like filters.
+     * Can be overridden per-call via options.defaultScope: false.
+     */
+    defaultScope?: Record<string, unknown> | (() => Record<string, unknown> | Promise<Record<string, unknown>>);
+    /**
+     * Optimistic locking using a version column.
+     * When configured, update/updateById:
+     *  - Include the version column in the WHERE clause matching the current value
+     *  - Increment the version column on each update
+     *  - Throw if no rows matched (version conflict)
+     */
+    optimisticLocking?: { column: string };
+    /**
+     * Enable automatic schema introspection from information_schema.
+     * When true, the model can introspect column names, types, nullability,
+     * and defaults from the database. When an object, `schema` specifies the
+     * PostgreSQL schema to introspect (default: 'public') and
+     * `autoCoerceTypes` automatically populates coerceTypes from discovered
+     * column types.
+     */
+    introspectSchema?: boolean | { schema?: string; autoCoerceTypes?: boolean };
+}
+
+export interface ModelSchemaColumn {
+    name: string;
+    dataType: string;
+    isNullable: "YES" | "NO";
+    columnDefault: string | null;
+    characterMaximumLength: number | null;
+    numericPrecision: number | null;
+    numericScale: number | null;
+    ordinalPosition: number;
+}
+
+export interface ModelSchema {
+    table: string;
+    schema: string;
+    columns: ModelSchemaColumn[];
+    columnMap: Record<string, ModelSchemaColumn>;
 }
 
 export interface Model {
@@ -1221,6 +1485,18 @@ export interface Model {
      * @param options - Options including atomic (default: true) and client for transaction
      */
     insertMany(rows: Record<string, unknown>[], options?: ModelFindOptions & { atomic?: boolean }): Promise<QueryResultRow[]>;
+    
+    /**
+     * Bulk upsert: insert rows, and on conflict (matching conflictColumns),
+     * update the specified columns using PostgreSQL ON CONFLICT DO UPDATE.
+     * @param rows - Array of records to upsert
+     * @param options.conflictColumns - Unique/constraint columns that trigger the conflict
+     * @param options.updateColumns - Columns to update on conflict (defaults to all non-conflict columns)
+     * @param options.returning - Columns to return (defaults to ["*"])
+     * @param options.atomic - Wrap in a transaction (default: true)
+     * @param options.client - Existing transaction client to join
+     */
+    bulkUpsert(rows: Record<string, unknown>[], options?: ModelFindOptions & { conflictColumns?: string[]; updateColumns?: string[]; atomic?: boolean }): Promise<QueryResultRow[]>;
     
     /**
      * Update records with automatic timestamps, validation, and hooks
@@ -1270,6 +1546,27 @@ export interface Model {
     findWithDeleted(where?: Record<string, unknown> | Array<Record<string, unknown>>, options?: ModelFindOptions): Promise<QueryResultRow[]>;
     
     /**
+     * Default scope configuration
+     */
+    defaultScope?: Record<string, unknown> | (() => Record<string, unknown> | Promise<Record<string, unknown>>);
+    /**
+     * Optimistic locking configuration
+     */
+    optimisticLocking?: { column: string };
+    
+    /**
+     * Serialize a model row to a plain object (e.g. convert Dates to ISO strings
+     * for JSON serialization).
+     */
+    serialize(row: QueryResultRow): Record<string, unknown>;
+    
+    /**
+     * Hydrate a plain object into a model-compatible format (e.g. convert ISO
+     * strings back to Date objects).
+     */
+    hydrate(data: Record<string, unknown>): Record<string, unknown>;
+    
+    /**
      * Permanently delete records (bypasses soft delete)
      */
     forceDelete(where: Record<string, unknown>, options?: ModelFindOptions): Promise<QueryResultRow[]>;
@@ -1310,6 +1607,20 @@ export interface Model {
      * Get the validation function
      */
     readonly validate?: (data: Record<string, unknown>, operation: 'create' | 'update') => Record<string, unknown> | Promise<Record<string, unknown>>;
+
+    // ========== SCHEMA INTROSPECTION ==========
+
+    /**
+     * Introspect the database schema for this model's table from
+     * information_schema.columns. Discovers column names, types, nullability,
+     * defaults, and character maximum length.
+     */
+    introspect(options?: { schema?: string; force?: boolean }): Promise<ModelSchema>;
+
+    /**
+     * Get the last introspected schema, or null if not yet introspected.
+     */
+    getSchema(): ModelSchema | null;
     
     // ========== RELATIONSHIP METHODS ==========
     
@@ -1370,6 +1681,20 @@ export interface Model {
     ): Promise<QueryResultRow | null>;
     
     /**
+     * Load related data for records (lazy relationship loading).
+     * Attaches related records to each parent record under the relationship name key.
+     * @param records - Array of parent records to load relationships for
+     * @param relationshipName - Name of the relationship as defined in model options
+     * @param getModel - Optional function to resolve a model name to a model instance.
+     *                   If omitted, the model's query function must have a .model() method.
+     */
+    loadRelated(
+        records: QueryResultRow[],
+        relationshipName: string,
+        getModel?: (modelName: string) => unknown
+    ): Promise<QueryResultRow[]>;
+    
+    /**
      * Get the relationships configuration
      */
     readonly relationships?: {
@@ -1427,23 +1752,600 @@ export type ModelFactory = (table: string, options?: ModelOptions) => Model;
 export interface MigrationDefinition {
     id?: string;
     name?: string;
-    up: string | ((context: { client: PoolClient; query: PoolClient["query"]; logger?: Logger }) => Promise<unknown>);
-    down?: string | ((context: { client: PoolClient; query: PoolClient["query"]; logger?: Logger }) => Promise<unknown>);
+    up: string | ((context: { client: PoolClient; query: MigrationQueryFn; logger?: Logger }) => Promise<unknown>);
+    down?: string | ((context: { client: PoolClient; query: MigrationQueryFn; logger?: Logger }) => Promise<unknown>);
+    dependsOn?: string[];
+    mode?: MigrationMode;
+    retry?: MigrationRetryOptions;
     sql?: string;
     source?: string;
+    requiresApproval?: boolean;
+    backupBefore?: boolean;
+}
+
+export type MigrationRunStatus = "pending" | "applied" | "failed" | "skipped";
+
+export type MigrationQueryFn = (text: string, values?: unknown[]) => Promise<unknown>;
+
+export type MigrationMode = "transactional" | "non-transactional";
+
+export type RollbackRisk = "safe" | "potentially-destructive" | "irreversible";
+export interface ApprovalProvider {
+    requiresApproval?(migration: MigrationDefinition, context?: { runnerId?: string; host?: string; targetDatabase?: string }): boolean;
+    approve?(migration: MigrationDefinition, context?: { runnerId?: string; host?: string; targetDatabase?: string }): Promise<{ approved: boolean; approvedBy?: string; approvedAt?: unknown; reason?: string }>;
+}
+
+export interface BackupProvider {
+    backup(targetDatabase: string, context: { migrationId?: string; reason: string; runnerId?: string }): Promise<{ backupId: string; backupLocation?: string; createdAt?: unknown }>;
+    restore?(backupId: string, targetDatabase?: string): Promise<void>;
+    exists?(backupId: string): Promise<boolean>;
+}
+
+export type ApprovalStatus = "approved" | "rejected" | "bypassed" | "not_required";
+
+export interface MigrationApprovalResult {
+    migrationId: string;
+    approved: boolean;
+    approvedBy?: string;
+    approvedAt?: unknown;
+    reason?: string;
+    status: ApprovalStatus;
+}
+
+export interface BaselineRecord {
+    id: string;
+    name: string;
+    appliedMigrationIds: string[];
+    checksum: string;
+    createdAt: unknown;
+    createdBy?: string;
+    verified: boolean;
+    schemaVersion?: string;
+}
+
+export interface BaselineOptions {
+    name: string;
+    migrations: MigrationDefinition[];
+    verify?: boolean;
+    createdBy?: string;
+    schemaVersion?: string;
+}
+
+export interface BaselineResult {
+    baseline: BaselineRecord;
+    appliedCount: number;
+    skipped: string[];
+}
+
+export interface SquashOptions {
+    name?: string;
+    migrations?: MigrationDefinition[];
+    keepHistorical?: boolean;
+    dryRun?: boolean;
+}
+
+export interface SquashResult {
+    baseline: BaselineRecord;
+    squashed: string[];
+    skipped: string[];
+    dryRun: boolean;
+}
+
+export interface MigrationProgressOptions {
+    source?: unknown;
+    migrations?: MigrationDefinition[];
+    directory?: string;
+    onProgress?: (progress: MigrationProgressEvent) => void;
+}
+
+export interface MigrationProgressEvent {
+    migrationId: string;
+    status: "pending" | "running" | "completed" | "failed" | "skipped";
+    startedAt?: unknown;
+    completedAt?: unknown;
+    durationMs?: number;
+    error?: string;
+}
+
+export interface MigrationProgressResult {
+    total: number;
+    completed: number;
+    failed: number;
+    skipped: number;
+    events: MigrationProgressEvent[];
+    durationMs: number;
+}
+
+export interface DiscoverDependenciesOptions {
+    source?: unknown;
+    migrations?: MigrationDefinition[];
+    directory?: string;
+}
+
+export interface DiscoverDependenciesResult {
+    migrations: MigrationDefinition[];
+    dependencyGraph: Record<string, string[]>;
+    cycles: string[][];
+    roots: string[];
+    leaves: string[];
+    ordered: string[];
+}
+
+export interface RepairMigrationOptions {
+    migrationId: string;
+    action: "mark-applied" | "mark-failed" | "mark-pending" | "retry";
+    source?: unknown;
+    migrations?: MigrationDefinition[];
+    directory?: string;
+    checksum?: string;
+}
+
+export interface RepairMigrationResult {
+    migrationId: string;
+    previousStatus: string;
+    newStatus: string;
+    action: string;
+    checksum?: string;
+}
+
+export interface MigrationBackupRecord {
+    id: string;
+    migrationId: string;
+    targetDatabase?: string;
+    backupId: string;
+    backupLocation?: string;
+    createdAt: unknown;
+    successful: boolean;
+}
+
+
+
+export interface RollbackAssessment {
+    migrationId: string;
+    risk: RollbackRisk;
+    reason: string;
+    hasDown: boolean;
+    autoGenerated?: boolean;
+    requiresConfirmation: boolean;
+}
+
+export interface RollbackValidationResult {
+    id: string;
+    name: string;
+    valid: boolean;
+    error?: string;
+    risk: RollbackRisk;
+}
+
+export interface RollbackDependencyCheck {
+    safe: boolean;
+    blocking: Array<{ migrationId: string; dependentOn: string[] }>;
+}
+
+export interface MigrationAuditEvent {
+    id: string;
+    migrationId: string;
+    target: string;
+    checksum: string;
+    startedAt: unknown;
+    completedAt: unknown;
+    durationMs: number;
+    status: "applied" | "failed" | "rolled_back" | "skipped";
+    attempt: number;
+    mode: MigrationMode;
+    error?: string;
+    rollbackRisk?: RollbackRisk;
+    applicationVersion?: string;
+    runnerId?: string;
+    host?: string;
+}
+
+export interface MigrationTarget {
+    id: string;
+    pool: Pool;
+    database?: string;
+    host?: string;
+}
+
+export interface TargetDrift {
+    targetId: string;
+    targetDatabase?: string;
+    driftType: "missing_migration" | "extra_migration" | "checksum_mismatch" | "status_mismatch";
+    migrationId: string;
+    expected?: MigrationLogRecord;
+    actual?: MigrationLogRecord;
+}
+
+export interface InterruptionRecord {
+    id: string;
+    migrationId: string;
+    targetDatabase?: string;
+    checksum: string;
+    startedAt: unknown;
+    attempt: number;
+    mode: MigrationMode;
+    error?: string;
+    runnerId?: string;
+    host?: string;
+}
+
+export interface RecoveryResult {
+    recovered: string[];      // migrations confirmed applied, history marked complete
+    failed: string[];         // migrations not applied, marked failed
+    skipped: string[];        // migrations already complete, no action needed
+}
+
+export interface MigrationRecoveryOptions {
+    allTargets?: boolean;
+    targetDatabase?: string;
+    migrations?: MigrationDefinition[];
+    directory?: string;
+    source?: unknown;
+}
+
+export interface ReconcileResult {
+    reconciled: string[];
+    conflicts: string[];
+    interruptions: InterruptionRecord[];
+}
+
+export interface MigrationRetryOptions {
+    maxAttempts?: number;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+    retryableErrors?: string[];
+}
+
+export interface IndexInfo {
+    name: string;
+    table: string;
+    columns: string[];
+    unique: boolean;
+    schema: string;
+}
+
+export interface ConstraintInfo {
+    name: string;
+    table: string;
+    type: "PRIMARY KEY" | "UNIQUE" | "FOREIGN KEY" | "CHECK";
+    columns: string[];
+    schema: string;
+    definition: string;
+}
+
+export interface ForeignKeyInfo {
+    name: string;
+    table: string;
+    columns: string[];
+    foreignTable: string;
+    foreignColumns: string[];
+    onDelete: string;
+    onUpdate: string;
+    schema: string;
+}
+
+export interface SequenceInfo {
+    name: string;
+    schema: string;
+    dataType: string;
+    startValue: number;
+    incrementBy: number;
+}
+
+export interface EnumInfo {
+    name: string;
+    schema: string;
+    values: string[];
+}
+
+export interface ExtendedColumnInfo {
+    name: string;
+    type: string;
+    nullable: boolean;
+    default: string | null;
+    isIdentity: boolean;
+    isGenerated: boolean;
+    charMaxLength: number | null;
+    numericPrecision: number | null;
+    numericScale: number | null;
+}
+
+export interface ExtendedTableSchema {
+    name: string;
+    schema: string;
+    columns: Record<string, ExtendedColumnInfo>;
+    indexes: IndexInfo[];
+    constraints: ConstraintInfo[];
+    foreignKeys: ForeignKeyInfo[];
+    sequences: SequenceInfo[];
+    enums: EnumInfo[];
+}
+
+export interface SchemaChange {
+    object: string;
+    objectType: "table" | "column" | "index" | "constraint" | "foreign_key" | "sequence" | "enum";
+    changeType: "create" | "drop" | "alter";
+    risk: RollbackRisk;
+    details: Record<string, unknown>;
+    sql?: string;
+    rollbackSql?: string;
+    requiresManualIntervention: boolean;
+}
+
+export interface SchemaDiffResult {
+    createTable: Array<{ name: string; schema: string; columns: Record<string, string> }>;
+    dropTable: Array<{ name: string; schema: string }>;
+    alterTable: Array<{
+        name: string;
+        schema: string;
+        addColumns: Record<string, string>;
+        dropColumns: string[];
+    }>;
+    changes: SchemaChange[];
+    hasDestructiveChanges: boolean;
+    hasSafeChanges: boolean;
+}
+
+export interface MigrationLogRecord {
+    id: string;
+    name: string;
+    status: MigrationRunStatus;
+    applied: boolean;
+    checksum?: string;
+    execution_ms?: number;
+    applied_at?: unknown;
+    failed_at?: unknown;
+    error_message?: string;
+    attempts?: number;
 }
 
 export interface Migrator {
     table: string;
-    run(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string }): Promise<string[]>;
-    status(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string }): Promise<Array<{
-        id: string;
-        name: string;
-        applied: boolean;
-        appliedAt: unknown;
-    }>>;
-    rollback(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string; steps?: number }): Promise<string[]>;
+    pools: Pool[];
+    run(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string; targetFailurePolicy?: "stop" | "continue" }): Promise<string[]>;
+    status(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string }): Promise<MigrationLogRecord[]>;
+    validate(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string }): Promise<{
+        valid: boolean;
+        results: Array<{ id: string; name: string; status: MigrationRunStatus; error?: string }>;
+    }>;
+    dryRun(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string }): Promise<{
+        wouldApply: string[];
+        checksums: Record<string, string>;
+    }>;
+    rollback(options?: {
+        source?: unknown;
+        migrations?: MigrationDefinition[];
+        directory?: string;
+        steps?: number;
+        dryRun?: boolean;
+        allowDestructive?: boolean;
+    }): Promise<string[]>;
+    failed(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string }): Promise<MigrationLogRecord[]>;
+    assessRollback(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string; steps?: number }): Promise<RollbackAssessment[]>;
+    history(options?: { migrationId?: string; limit?: number }): Promise<MigrationAuditEvent[]>;
+    statusAllTargets(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string }): Promise<Map<string, MigrationLogRecord[]>>;
+    retryFailed(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string }): Promise<{ retried: number; succeeded: number; failed: number; skipped: number }>;
+    reconcile(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string; allTargets?: boolean }): Promise<ReconcileResult>;
+    detectDrift(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string }): Promise<{ drift: TargetDrift[] }>;
+    detectInterruptions(options?: MigrationRecoveryOptions): Promise<{ interruptions: InterruptionRecord[] }>;
+    recoverInterruptions(options?: MigrationRecoveryOptions): Promise<RecoveryResult>;
+    detectLongRunningTransactions(options?: { minDurationMs?: number }): Promise<{ transactions: LongRunningTransaction[] }>;
+    detectLockContention(options?: { minWaitMs?: number }): Promise<{ contention: LockContention[] }>;
+    getLockDiagnostics(): Promise<LockDiagnostics>;
+    expandContract(options: ExpandContractOptions): Promise<ExpandContractResult>;
+    backfill(options: BackfillOptions): Promise<BackfillResult>;
+    getBackfillStatus(options: BackfillStatusOptions): Promise<BackfillJob | null>;
+    pauseBackfill(options: PauseBackfillOptions): Promise<BackfillJob>;
+    resumeBackfill(options: ResumeBackfillOptions): Promise<BackfillJob>;
+    retryBackfill(options: RetryBackfillOptions): Promise<BackfillResult>;
+    cancelBackfill(options: CancelBackfillOptions): Promise<BackfillJob>;
+    verifyBackup(options: { migrationId?: string; target?: string; restoreTarget?: string }): Promise<{
+        backupId: string;
+        targetDatabase: string;
+        restored: boolean;
+        verified: boolean;
+        checks: Array<{ name: string; passed: boolean; detail?: string }>;
+    }>;
+    baseline(options?: BaselineOptions): Promise<BaselineResult>;
+    listBaselines(): Promise<BaselineRecord[]>;
+    squash(options?: SquashOptions): Promise<SquashResult>;
+    progress(options?: MigrationProgressOptions): Promise<MigrationProgressResult>;
+    discoverDependencies(options?: DiscoverDependenciesOptions): Promise<DiscoverDependenciesResult>;
+    repairMigration(options: RepairMigrationOptions): Promise<RepairMigrationResult>;
+    approveMigration(migrationId: string, context?: { runnerId?: string; host?: string; targetDatabase?: string }): Promise<MigrationApprovalResult>;
+    checkApproval(migrationId: string, context?: { runnerId?: string; host?: string; targetDatabase?: string }): Promise<MigrationApprovalResult>;
+    backups(options?: { migrationId?: string }): Promise<MigrationBackupRecord[]>;
+    ensureTables?(): Promise<void>;
+    validateRollback(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string; steps?: number }): Promise<{
+        valid: boolean;
+        results: RollbackValidationResult[];
+    }>;
+    checkRollbackDependencies(options?: { source?: unknown; migrations?: MigrationDefinition[]; directory?: string; steps?: number }): Promise<RollbackDependencyCheck>;
 }
+
+export interface LockWaitMetric {
+    lockKey: number;
+    waitMs: number;
+    acquiredAt: unknown;
+    runnerId?: string;
+}
+
+export interface LockContention {
+    lockKey: number;
+    waitMs: number;
+    pid: number;
+    query: string;
+    state: string;
+    applicationName?: string;
+    targetDatabase?: string;
+}
+
+export interface LongRunningTransaction {
+    pid: number;
+    xactStart: unknown;
+    durationMs: number;
+    state: string;
+    query: string | null;
+    applicationName?: string;
+    usename: string;
+    clientAddr?: string;
+    targetDatabase?: string;
+}
+
+export interface LockDiagnostics {
+    advisoryLocks: LockWaitMetric[];
+    lockContention: LockContention[];
+    longRunningTransactions: LongRunningTransaction[];
+    advisoryLockStatus: "free" | "held" | "contended";
+}
+
+export type ExpandContractPhase = "expand" | "backfill" | "verify" | "switch" | "contract";
+
+export type ExpandContractPhaseStatus =
+    | "pending"
+    | "running"
+    | "completed"
+    | "failed"
+    | "blocked"
+    | "needs_approval"
+    | "needs_reconciliation";
+
+export interface ExpandContractPhaseState {
+    phase: ExpandContractPhase;
+    status: ExpandContractPhaseStatus;
+    startedAt?: unknown;
+    completedAt?: unknown;
+    error?: string;
+}
+
+export interface ExpandContractStep {
+    phase: "expand" | "backfill" | "verify" | "switch" | "contract";
+    name: string;
+    sql: string;
+    downSql?: string;
+    batchSize?: number;
+    risk: RollbackRisk;
+    requiresManualIntervention: boolean;
+    requiresApproval?: boolean;
+    nonTransactional?: boolean;
+    compatibility?: { confirmed?: boolean };
+}
+
+export interface BackfillProgress {
+    total: number;
+    processed: number;
+    percentage: number;
+    startedAt: unknown;
+    lastUpdatedAt: unknown;
+    errors: number;
+}
+
+export interface ExpandContractOptions {
+    steps: ExpandContractStep[];
+    batchSize?: number;
+    maxRetries?: number;
+    onProgress?: (progress: BackfillProgress) => void;
+    allowDestructive?: boolean;
+    enforcePhases?: boolean;       // enforce expand→backfill→verify→switch→contract prerequisites
+    compatibility?: { confirmed?: boolean };  // default compatibility acknowledgement for all steps
+    migrationId?: string;          // stable id for phase tracking and approval scoping
+}
+
+export interface ExpandContractResult {
+    completedSteps: string[];
+    skippedSteps: string[];
+    progress: BackfillProgress[];
+    phaseStates: ExpandContractPhaseState[];
+    successful: boolean;
+    errors: string[];
+}
+
+export type BackfillCursorType = "serial" | "composite";
+
+export interface BackfillCursor {
+    type: BackfillCursorType;
+    columns: string[];          // ordering columns, stable and unique
+    direction?: "asc" | "desc";
+}
+
+export type BackfillJobStatus = "pending" | "running" | "paused" | "failed" | "completed" | "needs_reconciliation";
+
+export interface BackfillJob {
+    id: string;
+    migrationId: string;
+    targetDatabase?: string;
+    jobName: string;
+    status: BackfillJobStatus;
+    sourceTable: string;
+    cursorType: BackfillCursorType;
+    cursorColumns: string[];
+    cursorValue: unknown[] | null;
+    batchSize: number;
+    rowsProcessed: number;
+    rowsRemaining: number | null;
+    progressPercentage: number | null;
+    startedAt: unknown;
+    updatedAt: unknown;
+    completedAt: unknown;
+    lastError: string | null;
+    retryCount: number;
+    runnerId?: string;
+    host?: string;
+}
+
+export interface BackfillBatchContext {
+    client: PoolClient;
+    query: MigrationQueryFn;
+    rows: Array<Record<string, unknown>>;
+    batchNumber: number;
+}
+
+export interface BackfillProcessBatchResult {
+    processed: number;          // number of rows successfully transformed in this batch
+    skipped?: number;           // rows that needed no change
+    rowsRemaining?: number;     // estimate of remaining rows, if measurable
+}
+
+export interface BackfillOptions {
+    id: string;                 // job name (unique per migration + target)
+    migrationId: string;
+    target?: string;            // target database name; defaults to pools[0] database
+    table: string;
+    cursor: BackfillCursor;
+    batchSize?: number;
+    processBatch: (ctx: BackfillBatchContext) => Promise<BackfillProcessBatchResult>;
+    where?: string;             // optional trusted SQL filter appended to the batch SELECT
+    maxRetries?: number;
+    delayMs?: number;           // delay between batches
+    statementTimeout?: number;
+    onProgress?: (progress: BackfillProgress) => void;
+}
+
+export interface BackfillResult {
+    jobId: string;
+    status: BackfillJobStatus;
+    rowsProcessed: number;
+    batches: number;
+    progress: BackfillProgress;
+    errors: string[];
+    completed: boolean;
+}
+
+export interface BackfillStatusOptions {
+    id: string;
+    target?: string;
+}
+
+export interface PauseBackfillOptions extends BackfillStatusOptions {}
+export interface ResumeBackfillOptions extends BackfillStatusOptions {}
+export interface RetryBackfillOptions extends BackfillStatusOptions {
+    processBatch: (ctx: BackfillBatchContext) => Promise<BackfillProcessBatchResult>;
+    maxRetries?: number;
+    delayMs?: number;
+    statementTimeout?: number;
+    onProgress?: (progress: BackfillProgress) => void;
+}
+export interface CancelBackfillOptions extends BackfillStatusOptions {}
 
 export interface SchemaCreate {
     table(name: string, columns: Record<string, string>): Promise<void>;
@@ -1483,6 +2385,15 @@ export interface SchemaManager {
     alter: SchemaAlter;
     drop: SchemaDrop;
     constrain: SchemaConstrain;
+    inspect: {
+        schema(options?: { schemas?: string[] }): Promise<ExtendedTableSchema[]>;
+    };
+    diff: {
+        schema(
+            current: ExtendedTableSchema[],
+            desired: Record<string, Record<string, string>>,
+        ): SchemaDiffResult;
+    };
 }
 
 export interface Metrics {
@@ -1509,6 +2420,12 @@ export interface StreamOptions {
     timeout?: number;
     shardKey?: string;
     shardId?: string;
+    /** Abort signal to cancel the stream mid-execution. */
+    signal?: AbortSignal;
+    /** Number of retry attempts on stream/query failure (default: 0). */
+    retries?: number;
+    /** Progress callback invoked with rows streamed and elapsed time. */
+    onProgress?: (info: { rows: number; elapsedMs: number }) => void;
 }
 
 export interface StreamApi {
@@ -1519,61 +2436,12 @@ export interface CursorApi {
     cursor(text: string, values?: unknown[], options?: object): Promise<CursorHandle>;
 }
 
-export interface BatchApi {
-    insertMany(table: string, rows: Record<string, unknown>[], options?: InsertManyOptions): Promise<unknown>;
-    selectMany(
-        builderOrSql: any,
-        options?: {
-            chunkSize?: number;
-            queryOptions?: QueryOptions;
-            shardKey?: string;
-            shardId?: string;
-            client?: any;
-            onChunk?: (rows: unknown[]) => Promise<void> | void;
-        }
-    ): Promise<unknown[]>;
-    updateMany(
-        table: string,
-        values: Record<string, unknown>,
-        whereConditions: { column: string; operator: string; values: unknown[] }[],
-        options?: {
-            chunkSize?: number;
-            returning?: string[];
-            queryOptions?: QueryOptions;
-            shardKey?: string;
-            shardId?: string;
-            client?: any;
-        }
-    ): Promise<unknown[]>;
-    deleteMany(
-        table: string,
-        whereConditions: { column: string; operator: string; values: unknown[] }[],
-        options?: {
-            chunkSize?: number;
-            returning?: string[];
-            queryOptions?: QueryOptions;
-            shardKey?: string;
-            shardId?: string;
-            client?: any;
-        }
-    ): Promise<unknown[]>;
-    executeBatch(
-        builders: any[],
-        options?: {
-            chunkSize?: number;
-            transaction?: boolean;
-            queryOptions?: QueryOptions;
-            shardKey?: string;
-            shardId?: string;
-        }
-    ): Promise<QueryResult[]>;
-}
-
 export interface ClientApi {
     getClient(options?: { timeout?: number }): Promise<PoolClient>;
     query: QueryRunner;
     queryOne<T extends QueryResultRow = QueryResultRow>(text: string | object, values?: unknown[] | QueryOptions, options?: QueryOptions): Promise<T | null>;
     releaseClient(client?: PoolClient | null, error?: unknown): void;
+    cancel(client: PoolClient): void;
     prepare(name: string, text: string): PreparedStatement;
     prepared(name: string, text: string, values?: unknown[], options?: QueryOptions): Promise<QueryResult>;
     hooks: QueryHooks;
@@ -1648,6 +2516,7 @@ export interface Database {
     check(options?: { timeout?: number }): Promise<HealthCheckResult>;
     health(options?: { timeout?: number }): Promise<HealthResult>;
     shutdown(options?: { timeout?: number }): Promise<void>;
+    readonly isClosed: boolean;
     batch: BatchApi;
     from(table: string): QueryBuilder;
     table(table: string): QueryBuilder;
@@ -1673,123 +2542,3 @@ export interface Database {
      */
     replication: ReplicationApi;
 }
-
-export class DatabaseError extends Error {
-    name = "DatabaseError";
-    code?: string;
-    detail?: string;
-    hint?: string;
-    constraint?: string;
-    table?: string;
-    column?: string;
-    schema?: string;
-    dataType?: string;
-    severity?: string;
-    position?: string;
-    where?: string;
-    routine?: string;
-    sqlState?: string;
-    transient: boolean;
-    cause?: unknown;
-
-    constructor(message: string, options?: { cause?: unknown }) {
-        super(message, options);
-        this.transient = false;
-    }
-
-    toJSON(): Record<string, unknown> {
-        return {
-            name: this.name,
-            message: this.message,
-            code: this.code,
-            detail: this.detail,
-            hint: this.hint,
-            constraint: this.constraint,
-            table: this.table,
-            column: this.column,
-            schema: this.schema,
-            dataType: this.dataType,
-            severity: this.severity,
-            position: this.position,
-            where: this.where,
-            routine: this.routine,
-            sqlState: this.sqlState,
-            transient: this.transient,
-            cause: this.cause,
-        };
-    }
-}
-
-export class TimeoutError extends DatabaseError {
-    name = "TimeoutError";
-    timeout?: number;
-
-    constructor(message: string, options?: { cause?: unknown; timeout?: number }) {
-        super(message, options);
-        this.timeout = options?.timeout;
-    }
-}
-
-export declare const dbConfig: DatabaseConfig;
-
-export declare function createDatabase(options?: CreateDatabaseOptions): Database;
-export declare function createPool(options?: { logger?: Logger; config?: DatabaseConfig; onError?(error: unknown): void }): Pool;
-export declare function createClient(pool: Pool, logger?: Logger, options?: CreateDatabaseOptions): Pick<Database, "getClient" | "query" | "queryOne" | "releaseClient" | "prepare" | "prepared" | "hooks">;
-export declare function createTransaction(options: { pool: Pool; logger?: Logger; hooks?: Hooks; retry?: boolean | number | RetryOptions }): Pick<Database, "transaction" | "savepoint">;
-export declare function createStream(pool: Pool, logger?: Logger, defaults?: { timeout?: number }): Pick<Database, "stream">;
-export declare function createCursor(pool: Pool): Pick<Database, "cursor">;
-export declare function createCheck(pool: Pool): Pick<Database, "check" | "health">;
-export declare function createShutdown(pool: Pool, options?: { logger?: Logger; timeout?: number }): { shutdown: Database["shutdown"]; readonly isClosed: boolean };
-export declare function createBatch(options?: { query?: Database["query"]; transaction?: Database["transaction"] }): BatchApi;
-export declare function createSchemaManager(pool: Pool): SchemaManager;
-export declare function createMigrator(pool: Pool, options?: { logger?: Logger; table?: string; lockKey?: number; source?: unknown; migrations?: MigrationDefinition[]; directory?: string }): Migrator;
-export declare function createModel(options: { query: Database["query"]; table: string; idColumn?: string; logger?: Logger; transaction?: Database["transaction"] }): Model;
-export declare function createModelFactory(options?: { query?: Database["query"]; logger?: Logger; transaction?: Database["transaction"] }): Database["model"];
-export declare function createQueryBuilder(options?: { query?: Database["query"]; logger?: Logger }): Database["from"];
-export declare function createHooks(options?: { logger?: Logger; metrics?: Metrics; instrumentation?: InstrumentationOptions } & InstrumentationOptions): Hooks;
-export declare function createMetrics(): Metrics;
-export declare function createRetry(defaults?: RetryOptions): RetryApi;
-export declare function loadDatabaseConfig(overrides?: DatabaseConfig, env?: NodeJS.ProcessEnv): DatabaseConfig;
-export declare function parseSslConfig(env?: NodeJS.ProcessEnv): SslConfig;
-export declare function withRetry<T>(fn: (attempt: number) => Promise<T>, options?: RetryOptions): Promise<T>;
-export declare function normalizeError(error: unknown): DatabaseError;
-export declare function isDatabaseError(error: unknown): error is DatabaseError;
-export declare function isTransientError(error: unknown): boolean;
-export declare function isUniqueViolation(error: unknown): boolean;
-export declare function isForeignKeyViolation(error: unknown): boolean;
-export declare function isNotNullViolation(error: unknown): boolean;
-export declare function isCheckViolation(error: unknown): boolean;
-export declare function isExclusionViolation(error: unknown): boolean;
-export declare function isSerializationFailure(error: unknown): boolean;
-export declare function isDeadlock(error: unknown): boolean;
-export declare function isConnectionError(error: unknown): boolean;
-export declare function isConstraintViolation(error: unknown): boolean;
-
-export declare function sql(strings: TemplateStringsArray, ...values: unknown[]): SqlFragment;
-export declare namespace sql {
-    function raw(text: string): SqlFragment;
-    function identifier(name: string): SqlFragment;
-    function quoteIdent(name: string): string;
-    function quoteIdentList(names: string | string[]): string;
-    function isFragment(value: unknown): boolean;
-    function join(values: unknown[], separator?: string): SqlFragment;
-}
-
-export declare function raw(text: string): SqlFragment;
-export declare function identifier(name: string): SqlFragment;
-export declare function quoteIdent(name: string): string;
-export declare function quoteIdentList(names: string | string[]): string;
-
-export declare function id(): { id: string };
-export declare function bigIntId(): { id: string };
-export declare function uuid(columnName?: string): Record<string, string>;
-export declare function timestamp(...columnNames: string[]): Record<string, string>;
-
-export declare function encode(value: unknown): Buffer;
-export declare function decode(buffer: Buffer | Uint8Array | string): unknown;
-export declare function encodeToString(value: unknown): string;
-export declare function decodeFromString(value: string): unknown;
-export declare function serializeRow(row: unknown): Buffer;
-export declare function deserializeRow(buffer: Buffer | Uint8Array | string): unknown;
-export declare function serializeQueryResult(result: Pick<QueryResult, "rows" | "rowCount" | "fields">): Buffer;
-export declare function deserializeQueryResult(buffer: Buffer | Uint8Array | string): unknown;
