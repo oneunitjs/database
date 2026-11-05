@@ -111,17 +111,17 @@
     "url": "https://github.com/sponsors/oneunitjs"
   },
   "dependencies": {
-    "pg": "^8.22.0"
+    "pg": "^8.23.1"
   },
   "devDependencies": {
-    "@testcontainers/postgresql": "^12.2.1",
-    "@types/node": "^24.5.2",
-    "@types/pg": "^8.11.10",
-    "pg-cursor": "^2.21.0",
-    "pg-query-stream": "^4.16.0",
-    "testcontainers": "^12.2.1",
-    "tsx": "^4.20.5",
-    "typescript": "^5.9.2",
+    "@testcontainers/postgresql": "^11.14.0",
+    "@types/node": "^20.19.43",
+    "@types/pg": "^8.23.1",
+    "pg-cursor": "^2.22.1",
+    "pg-query-stream": "^4.17.1",
+    "testcontainers": "^11.14.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
     "vitest": "^3.2.7"
   },
   "peerDependencies": {

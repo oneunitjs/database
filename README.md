@@ -2,6 +2,15 @@
 
 > **A batteries-included PostgreSQL client for Node.js applications, from simple CRUD services to distributed database deployments.**
 
+[![CI](https://github.com/oneunitjs/database/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/oneunitjs/database/actions/workflows/ci.yml)
+[![Security](https://github.com/oneunitjs/database/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/oneunitjs/database/actions/workflows/security.yml)
+[![CodeQL Advanced](https://img.shields.io/github/actions/workflow/status/oneunitjs/database/security.yml?branch=main&job=codeql&label=CodeQL%20Advanced)](https://github.com/oneunitjs/database/actions/workflows/security.yml)
+[![Publish to npm](https://github.com/oneunitjs/database/actions/workflows/publish.yml/badge.svg)](https://github.com/oneunitjs/database/actions/workflows/publish.yml)
+[![AI PR Summary](https://github.com/oneunitjs/database/actions/workflows/ai-summary.yml/badge.svg?branch=main)](https://github.com/oneunitjs/database/actions/workflows/ai-summary.yml)
+[![Bug Report](https://github.com/oneunitjs/database/actions/workflows/bug-report.yml/badge.svg?branch=main)](https://github.com/oneunitjs/database/actions/workflows/bug-report.yml)
+[![Dependabot](https://img.shields.io/badge/Dependabot-weekly-025E8C?logo=dependabot&logoColor=white)](.github/dependabot.yml)
+[![Issue routing](https://img.shields.io/badge/Issue%20routing-enabled-2DA44E?logo=github)](.github/ISSUE_TEMPLATE/config.yml)
+[![Bug report form](https://img.shields.io/badge/Bug%20report-form-6E7781?logo=github)](.github/ISSUE_TEMPLATE/bug_report.md)
 [![npm version](https://img.shields.io/npm/v/@oneunit/database?color=0969da&label=npm)](https://www.npmjs.com/package/@oneunit/database)
 [![license](https://img.shields.io/npm/l/@oneunit/database?color=22863a)](https://github.com/oneunitjs/database/blob/main/packages/database/LICENSE)
 ![Node.js >= 20](https://img.shields.io/badge/node-%3E%3D20-417e38)
@@ -119,6 +128,7 @@ Two-phase commit (2PC) coordinates a transaction across multiple PostgreSQL serv
 - [Sub-path Exports](#sub-path-exports)
 - [Examples](#examples)
 - [Testing](#testing)
+- [Development & GitHub Workflows](#development--github-workflows)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -3004,9 +3014,20 @@ npx vitest run test/client  # run one directory
 
 ---
 
-## Contributing
+## Development & GitHub Workflows
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and the PR workflow.
+Use Node.js 20 or newer. From a clean checkout, install dependencies and run the same checks used by CI:
+
+```bash
+npm ci
+npm run typecheck
+npm run build
+npm test
+```
+
+`npm run test:watch` runs tests interactively, and `npm run pack:check` checks the package contents before publishing. CI runs typecheck, build, and tests for Node.js 20, 22, and 24 on pushes and pull requests targeting `main`.
+
+For questions, use [GitHub Discussions](https://github.com/oneunitjs/database/discussions). For bugs and feature requests, use [GitHub Issues](https://github.com/oneunitjs/database/issues) and include a minimal reproduction where possible.
 
 ---
 
