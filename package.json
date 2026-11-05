@@ -115,7 +115,7 @@
   },
   "devDependencies": {
     "@testcontainers/postgresql": "^11.14.0",
-    "@types/node": "^20.19.43",
+    "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "pg-cursor": "^2.22.1",
     "pg-query-stream": "^4.17.1",
